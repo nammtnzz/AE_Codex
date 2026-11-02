@@ -3,6 +3,8 @@
 param(
     # Fixture/repair mode updates only an existing owned table, without invoking Codex.
     [switch]$SkipRegistration,
+    # Explicitly permit a fixture/custom config path for desktop registration.
+    [switch]$RegisterDesktop,
     [string]$ConfigPath
 )
 
@@ -11,9 +13,13 @@ $ErrorActionPreference = 'Stop'
 $workspaceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $serverPath = Join-Path $PSScriptRoot 'AeFunctionsMcp.js'
 if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "AE MCP server is missing: $serverPath" }
-if ($ConfigPath -and -not $SkipRegistration) { throw '-ConfigPath is allowed only with -SkipRegistration; normal registration uses the active Codex user configuration.' }
+if ($SkipRegistration -and $RegisterDesktop) { throw '-SkipRegistration and -RegisterDesktop cannot be combined.' }
+if ($ConfigPath -and -not ($SkipRegistration -or $RegisterDesktop)) { throw '-ConfigPath requires -SkipRegistration or -RegisterDesktop; normal registration uses the active Codex user configuration.' }
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-$pwshPath = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$pwshPath = (Get-Process -Id $PID).Path
+if ([IO.Path]::GetFileName($pwshPath) -ine 'pwsh.exe') {
+    $pwshPath = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
 if (-not $ConfigPath) {
     $codexUserDirectory = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
         Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'
@@ -22,11 +28,27 @@ if (-not $ConfigPath) {
 }
 $ConfigPath = [IO.Path]::GetFullPath($ConfigPath)
 if (-not $SkipRegistration) {
-    $codexPath = (Get-Command codex -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-    $registrationArguments = @('mcp', 'add', 'ae_functions', '--env', "CODEX_AE_PWSH=$pwshPath", '--', $nodePath, $serverPath)
-    # Do not echo other configuration or diagnostic text that might contain credentials.
-    & $codexPath @registrationArguments 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Codex MCP registration failed with exit code $LASTEXITCODE. Existing project trust settings were not changed." }
+    # The desktop app, CLI and IDE share this current user's config.toml. Register
+    # only our owned table directly; a new desktop-only machine needs no CLI.
+    $configHelperPath = Join-Path $PSScriptRoot 'AeCodexConfig.js'
+    if (-not (Test-Path -LiteralPath $configHelperPath -PathType Leaf)) { throw "Codex configuration helper is missing: $configHelperPath" }
+    $normalizedNodePath = $nodePath.Replace('\', '/')
+    $normalizedServerPath = $serverPath.Replace('\', '/')
+    $normalizedPwshPath = $pwshPath.Replace('\', '/')
+    $normalizedWorkspaceRoot = $workspaceRoot.Replace('\', '/')
+    $registrationOutput = & $nodePath $configHelperPath $ConfigPath $normalizedNodePath $normalizedServerPath $normalizedPwshPath $normalizedWorkspaceRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Codex desktop MCP registration was not completed. Existing unrelated settings and account data were not changed.' }
+    $registration = $registrationOutput | ConvertFrom-Json
+    [ordered]@{
+        schema = 'codex-ae-mcp-install/v1'; state = 'success'; server = 'ae_functions'
+        registered = $true; registrationMethod = 'desktop-config'; runtimeVerified = $false
+        enabled = $registration.enabled; changed = $registration.changed; backupPath = $registration.backupPath
+        timeoutsUpdated = $registration.changed; configPath = $ConfigPath
+        command = $normalizedNodePath; serverPath = $normalizedServerPath; powershellPath = $normalizedPwshPath
+        workspaceRoot = $normalizedWorkspaceRoot; startupTimeoutSeconds = 10; toolTimeoutSeconds = 210
+        nextStep = if ($registration.enabled) { 'Reload Codex MCP connections or open a new Codex session to load ae_functions. Existing account and project trust settings were preserved.' } else { 'The existing disabled AE MCP preference was preserved. Enable ae_functions in Codex settings, then reload its MCP connections.' }
+    } | ConvertTo-Json -Depth 8
+    return
 }
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "Codex configuration not found: $ConfigPath" }
 $original = [IO.File]::ReadAllText($ConfigPath)

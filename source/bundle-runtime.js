@@ -1,6 +1,17 @@
 /* ES3 runtime. Branch bodies remain inert in the indexed comment at EOF. */
 (function () {
-    var ROOT = "C:/Users/nguye/AE_Codex";
+    function workspaceRoot() {
+        var configured = $.global.__CODEX_AE_WORKSPACE_ROOT__, script;
+        if (typeof configured === "string" && configured.replace(/^\s+|\s+$/g, "")) {
+            return (new Folder(configured)).fsName.replace(/\\/g, "/").replace(/\/$/, "");
+        }
+        script = new File($.fileName);
+        if (String(script.parent.name).toLowerCase() !== "jsx") {
+            throw new Error("Open Codex Bridge through its installed loader or the workspace jsx folder.");
+        }
+        return script.parent.parent.fsName.replace(/\\/g, "/").replace(/\/$/, "");
+    }
+    var ROOT = workspaceRoot();
     var PATH = ROOT + "/jsx/Codex Bridge.jsx";
     var nativeEvalFile = $.evalFile;
     function checksum(text) {

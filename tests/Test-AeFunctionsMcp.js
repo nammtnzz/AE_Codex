@@ -15,6 +15,9 @@ fs.mkdirSync(fixtureFunctions, { recursive: true });
 fs.mkdirSync(path.join(fixtureRoot, "jsx"));
 fs.writeFileSync(path.join(fixtureRoot, "jsx/Codex Bridge.jsx"), "// fixture only\n");
 fs.copyFileSync(path.join(workspaceRoot, "tools/AeFunctionsMcp.js"), path.join(fixtureTools, "AeFunctionsMcp.js"));
+assert.match(fs.readFileSync(path.join(fixtureTools, "AeFunctionsMcp.js"), "utf8"),
+    /"-ExecutionPolicy",\s*"Bypass",\s*"-File"/,
+    "MCP must launch its unsigned local PowerShell client with process-scoped ExecutionPolicy Bypass");
 for (const name of ["AeCapabilities.js", "AeScriptSource.js"]) {
     fs.copyFileSync(path.join(workspaceRoot, "tools", name), path.join(fixtureTools, name));
 }

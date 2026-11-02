@@ -53,6 +53,12 @@ $mp3Path = Join-Path $audioRoot 'drip.MP3'
 [System.IO.File]::WriteAllBytes((Join-Path $audioRoot 'pending-sfx.zip'), [byte[]](1, 2))
 [System.IO.File]::WriteAllBytes((Join-Path $outsideRoot 'must-not-scan.wav'), [byte[]](8))
 
+$unconfigured = Invoke-Helper
+$unconfiguredSettings = [System.IO.File]::ReadAllText((Join-Path $library 'config.json')) | ConvertFrom-Json
+Assert-Check ($unconfigured.enabled -eq $false -and $unconfigured.skipped -and $unconfigured.count -eq 0 -and $unconfigured.rootCount -eq 0) 'An unconfigured new machine publishes an empty disabled inventory without searching default folders.'
+Assert-Check ($unconfiguredSettings.sfx.enabled -eq $false -and $unconfiguredSettings.sfx.roots.Count -eq 0) 'New-machine preferences opt out with no personal or drive-specific default roots.'
+Assert-Check (-not (Test-Path -LiteralPath (Join-Path $library 'sfx-cache.jsonl'))) 'An opted-out initial refresh does not create or read the incremental audio cache.'
+
 $first = Invoke-Helper -Arguments @('-Roots', $audioRoot)
 $firstSummary = Get-Summary $first
 Assert-Check ($first.state -eq 'success' -and $first.count -eq 2 -and $first.updatedCount -eq 2) 'First scan catalogs audio metadata only.'
@@ -67,10 +73,23 @@ $second = Invoke-Helper
 Assert-Check ($second.reusedCount -eq 2 -and $second.updatedCount -eq 0) 'Second scan reuses unchanged metadata records.'
 Assert-Check ($second.reusedCatalog -and $second.catalogRelativePath -ceq $first.catalogRelativePath -and
     $second.catalogRequestId -ceq $first.requestId -and $second.catalogSessionId -ceq $first.sessionId) 'Unchanged refreshes reuse the prior immutable catalog across sessions.'
-Assert-Check (@(Get-ChildItem -LiteralPath (Join-Path $library 'sessions') -Recurse -File -Filter '*.jsonl').Count -eq 1) 'An unchanged refresh publishes no additional full JSONL snapshot.'
+Assert-Check (@(Get-ChildItem -LiteralPath (Join-Path $library 'sessions') -Recurse -File -Filter '*.jsonl').Count -eq 2) 'An unchanged refresh publishes no additional full JSONL snapshot after the initial disabled inventory.'
 $latest = [System.IO.File]::ReadAllText((Join-Path $library 'latest-sfx.json')) | ConvertFrom-Json
 Assert-Check ($latest.requestId -ceq $second.requestId -and $latest.catalogRelativePath -ceq $first.catalogRelativePath -and
     [System.IO.File]::Exists((Join-Path $testRoot $latest.summaryRelativePath))) 'Atomic latest pointer separates current scan identity from reusable catalog identity.'
+$cachePath = Join-Path $library 'sfx-cache.jsonl'
+[System.IO.File]::AppendAllText($cachePath, "`r`n   `r`n")
+$blankCache = Invoke-Helper
+Assert-Check ($blankCache.count -eq 2 -and $blankCache.reusedCount -eq 2 -and $blankCache.updatedCount -eq 0 -and $blankCache.warningCount -eq 0 -and $blankCache.reusedCatalog) 'Batch cache loading tolerates blank JSONL lines and preserves unchanged records.'
+$overlapConfigPath = Join-Path $library 'config.json'
+$overlapConfig = [System.IO.File]::ReadAllText($overlapConfigPath) | ConvertFrom-Json
+$overlapConfig.sfx.roots = @($audioRoot, (Join-Path $audioRoot 'Cartoon'))
+[System.IO.File]::WriteAllText($overlapConfigPath, ($overlapConfig | ConvertTo-Json -Depth 5 -Compress))
+$overlap = Invoke-Helper
+$overlapSummary = Get-Summary $overlap
+Assert-Check ($overlap.count -eq 2 -and $overlap.reusedCount -eq 2 -and $overlapSummary.enumeratedDirectoryCount -eq 2 -and $overlapSummary.skippedOverlappingDirectoryCount -eq 1) 'Overlapping watched roots enumerate a directory only once and keep the first configured root attribution.'
+$overlapConfig.sfx.roots = @($audioRoot)
+[System.IO.File]::WriteAllText($overlapConfigPath, ($overlapConfig | ConvertTo-Json -Depth 5 -Compress))
 $addedPath = Join-Path $audioRoot 'new-knife-dodge.ogg'
 [System.IO.File]::WriteAllBytes($addedPath, [byte[]](1, 2, 3))
 $added = Invoke-Helper
@@ -168,6 +187,29 @@ $config.sfx.roots = @()
 [System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 5 -Compress))
 $empty = Invoke-Helper
 Assert-Check ($empty.state -eq 'success' -and $empty.count -eq 0 -and $empty.rootCount -eq 0) 'An empty watched-folder list succeeds without scanning any drive.'
+
+$config.sfx | Add-Member -NotePropertyName enabled -NotePropertyValue $false -Force
+$config.sfx.roots = @($junctionPath, [System.IO.Path]::GetPathRoot($audioRoot))
+$config.sfx.extensions = @('.invalid')
+[System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 5 -Compress))
+$cachePath = Join-Path $library 'sfx-cache.jsonl'
+[System.IO.File]::WriteAllText($cachePath, '{cache-must-not-be-read-or-erased')
+$cacheBefore = [System.IO.File]::ReadAllText($cachePath)
+Write-Request -Id 'library-disabled-001'
+$disabled = Invoke-Helper -Arguments @('-RequestId', 'library-disabled-001')
+Assert-Check ($disabled.state -eq 'success' -and $disabled.enabled -eq $false -and $disabled.skipped -and $disabled.count -eq 0 -and $disabled.warningCount -eq 0) 'A background request respects explicit opt-out even when stored folders and extensions would be unsafe to scan.'
+Assert-Check ([System.IO.File]::ReadAllText($cachePath) -ceq $cacheBefore) 'Opting out does not read or erase an existing incremental cache.'
+Assert-Check ([System.IO.File]::ReadAllText((Join-Path $testRoot $disabled.catalogRelativePath)) -ceq '') 'A disabled refresh cannot expose a previous catalog through its published inventory.'
+
+$config.sfx.PSObject.Properties.Remove('enabled')
+$config.sfx.roots = @($audioRoot)
+$config.sfx.extensions = @('.wav')
+[System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 5 -Compress))
+$backwardCompatible = Invoke-Helper
+Assert-Check ($backwardCompatible.enabled -and $backwardCompatible.count -eq 1) 'A previously configured user without an enabled flag keeps their watched-folder behavior.'
+[System.IO.File]::WriteAllText($cachePath, 'null')
+$nullCache = Invoke-Helper
+Assert-Check ($nullCache.count -eq 1 -and $nullCache.updatedCount -eq 1 -and $nullCache.warningCount -eq 1) 'A syntactically valid null cache record is rejected and rebuilt instead of disappearing during array enumeration.'
 
 $result = [pscustomobject]@{ state = 'success'; count = $checks.Count; checks = $checks.ToArray(); fixtureRoot = $testRoot }
 [System.IO.File]::WriteAllText((Join-Path $testRoot 'test-result.json'), ($result | ConvertTo-Json -Depth 4))

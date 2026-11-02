@@ -1,16 +1,138 @@
 # Codex + Adobe After Effects (Windows)
 
-## Bridge 1.9.0 — bộ chức năng AE dùng lại
+Bản hiện tại: **Bridge 2.0.4**, 43 công cụ AE dùng lại. Tải bộ cài ZIP tại
+[GitHub Releases](https://github.com/nammtnzz/AE_Codex/releases/latest), giải nén
+toàn bộ rồi chạy **Codex AE.exe**. Thư mục cài mặc định là `%LOCALAPPDATA%\AE_Codex`;
+source trong repo được giữ riêng với runtime đã cài.
+
+Mở **Codex AE.exe** ngay trong thư mục `AE_Codex` để vào phần cài đặt/cập nhật.
+Source và dữ liệu vẫn giữ nguyên đường dẫn; chế độ thư mục gọn chỉ ẩn các mục kỹ thuật
+bằng thuộc tính Windows. `HUONG-DAN.txt` có hướng dẫn hiện lại chúng.
+
+Sau khi build bản chia sẻ, tạo/cập nhật lối mở ở thư mục chính:
+
+~~~powershell
+pwsh -NoProfile -File .\tools\Publish-AeDesktopEntry.ps1 -CompactLayout
+~~~
+
+Khôi phục hiển thị đầy đủ bằng cùng lệnh với `-RestoreLayout`. Trạng thái gốc
+được lưu ở `.ae-codex/setup/workspace-layout.json`. Bật “Hidden items” trong
+Explorer cũng cho phép xem source; không cần di chuyển hoặc cài lại.
+
+Panel AE **Công cụ & kết nối** giữ trạng thái kết nối, danh sách công cụ,
+**Stop/Reconnect**, kiểm kê effect/SFX và nhật ký tiến trình/lỗi. Viết yêu cầu trực
+tiếp trong Codex; Codex gọi 43 công cụ AE qua MCP cục bộ của máy đang dùng.
+Model, mức nỗ lực, skill và hội thoại được chọn trong Codex.
+
+Phiên bản bộ cài được lấy trực tiếp từ phiên bản Bridge khi build. Bộ cài,
+manifest và mã gói cùng phiên bản với panel, không còn giữ số 1.1.0 riêng.
+
+Bản 2.0.0 khôi phục quyền sở hữu listener khi tham chiếu toàn cục bị mất và
+gắn lại callback của các nút khi nạp lại cùng panel. Heartbeat nay gắn với đúng
+workspace, phiên và revision; trạng thái running cũ hoặc timestamp quá hạn được
+đánh dấu stale và bị chặn trước khi dispatch. Nút Kết nối lại có thể khôi phục
+cả lịch khởi động bị mất; panel chỉ báo đã kết nối sau heartbeat mới
+và thay dòng trạng thái khôi phục bằng thông báo sẵn sàng.
+Controller cũ không được chiếm phiên mới, chạy lại lệnh hoặc tạo thêm timer.
+Nếu toàn bộ nút của panel không phản hồi, đóng/mở lại Window → Codex Bridge.jsx
+để nạp lại callback; không cần đóng project.
+
+Bản 1.18.6 chỉ dựng nội dung nhật ký khi bảng nhật ký thực sự hiện ra; khi thu
+gọn vẫn giữ dòng trạng thái và đủ 200 sự kiện gần nhất cùng log trên đĩa.
+MCP lưu một bản danh mục theo phiên bản tệp, thay vì đọc và phân tích lại ở mỗi
+lượt gọi. Các thay đổi tệp và lỗi vẫn được phát hiện; nhịp kết nối/nhận lệnh giữ nguyên.
+
+Bản 1.18.5 phục hồi lịch chạy quá hạn khi mở, kích hoạt hoặc bố trí lại panel.
+Trạng thái `running` cũ không còn đủ để coi listener còn hoạt động. Việc phục hồi
+giữ cùng phiên và dữ liệu kết quả, bỏ qua callback cũ và không thêm timer hay
+quét thư viện. Lựa chọn Dừng vẫn được giữ nguyên.
+
+Bản 1.18.4 giữ cầu nối khi Home hoặc đổi project làm panel cũ mất hiệu lực.
+Mở lại panel gắn giao diện vào phiên đang chạy, giữ lựa chọn Dừng và kết quả
+đang chờ ghi; không chạy lại lệnh hay quét thư viện. Số lượng tool được lưu
+theo runtime, không dựng lại toàn bộ danh mục mỗi nửa giây.
+
+Bản 1.18.3 dùng nút gốc của AE trong giao diện tối để tránh nút bị mất khi
+vẽ lại panel. Panel giữ một cách bố trí khi dock/đổi kích thước; không thêm
+timer vẽ lại hoặc quét thư viện.
+
+Bản 1.18.1 có ô **Effects**, **SFX** và nút **Cập nhật thư viện**. Hai ô bật/tắt
+việc lập danh mục, không tắt hiệu ứng trên layer hay âm thanh trong project.
+Khi có plugin/sound mới, chọn kho cần đọc rồi bấm cập nhật. Panel chỉ nạp dữ liệu
+đã lưu khi kết nối; không tự quét lại mỗi hai phút. Lựa chọn được lưu trên máy này.
+Nút **Thư mục…** bên cạnh SFX cho thêm hoặc thay thư mục âm thanh trên ổ mới. Danh sách cũ
+được giữ khi mở hộp chọn; bỏ một mục chỉ ngừng lập danh mục, không xóa âm thanh.
+Chọn dòng sai, bấm **Bỏ khỏi danh sách**, rồi **Lưu**. Bỏ hết và lưu sẽ tắt SFX;
+**Hủy** giữ nguyên cấu hình cũ.
+Lưu đường dẫn chưa chạy quét; bấm **Cập nhật thư viện** khi đã chọn xong.
+
+Bản 1.17.0 bỏ chat tích hợp, thumbnail, trình xem ảnh/video và tiến trình Codex
+app-server riêng của panel. AE không đọc lịch sử trò chuyện hoặc giải mã ảnh để
+vẽ hội thoại. Các nguồn chat cũ chỉ giữ để bảo trì, không đóng gói hay khởi chạy.
+Bộ cài không mang tài khoản, API key, lịch sử hoặc cấu hình cá nhân của máy nguồn.
+
+Giao diện dùng lại tài nguyên vẽ và chỉ cập nhật giá trị đã đổi. Quét thông số
+effect chia thành đợt tối đa 64 thao tác, nhường luồng AE sau khoảng 8 ms; một lời
+gọi native riêng lẻ vẫn có thể lâu hơn. Quét SFX chạy với ưu tiên CPU thấp hơn AE,
+dùng lại metadata và tránh duyệt trùng thư mục. Những thay đổi này giảm công việc
+của panel; RAM cache khung hình và plugin AE vẫn phụ thuộc project.
+
+## Chia sẻ sang máy mới
+
+Build bộ cài độc lập, không mang dữ liệu cá nhân hoặc script riêng của project:
+
+~~~powershell
+pwsh -NoProfile -File .\tools\Build-AeDistribution.ps1
+~~~
+
+File ZIP nằm dưới `.ae-codex/releases/` (đường dẫn/hash trong `latest.json`).
+Người nhận giải nén toàn bộ rồi mở **Codex AE.exe** để chọn phiên bản AE,
+cài/cập nhật và xem log. Bộ cài tạo thư mục `%LOCALAPPDATA%\AE_Codex`, runtime trong `versions`;
+panel/Startup chỉ là loader nhỏ trong AppData, không cần ghi vào Program Files.
+Giao diện bộ cài và panel AE dùng phong cách cartoon tối, chữ sáng và nút có màu nhấn.
+Bộ cài hiển thị tiếng Việt. Khi cài đặt hoàn tất và không có lỗi/cảnh báo cần xử lý,
+hiện “Bạn đã cài đặt thành công!” rồi tự đóng sau 3 giây. Lỗi giữ cửa sổ và log mở.
+Nút **Gỡ cài đặt** gỡ các thành phần của bản Codex AE đã chọn; dữ liệu project,
+media và source làm việc được giữ nguyên. Bấm **Stop** trong panel và chờ job hoàn tất trước khi gỡ.
+Bản đóng gói giữ đủ **43 tool dùng chung**, chỉ kèm nhánh thư viện inventory;
+**805 nhánh lịch sử vẫn giữ nguyên trong source phát triển**, không gửi project riêng.
+Không kèm API key, media, đường dẫn cá nhân, danh mục effects/SFX hoặc lịch sử job.
+
+Effects được cập nhật từ AE khi bạn bấm **Cập nhật thư viện**. SFX có lựa chọn
+**Bỏ qua** hoặc đồng ý rồi chọn thư mục; không quét âm thanh khi chưa đồng ý.
+Cập nhật giữ lựa chọn cũ, không chuyển job/lock giữa các bản runtime.
+Helper SFX chạy nền không mở CMD/PowerShell và không chặn AE khi khởi động.
+Helper khởi động lúc cài và khi đăng nhập Windows; panel chỉ gửi yêu cầu JSON,
+không mở EXE nên không gây cảnh báo chạy file trong AE. Cập nhật/gỡ kích hoạt
+qua `tools/AeBackgroundServiceLifecycle.ps1`; chỉ quản lý mục tự chạy của Codex AE.
+Lỗi helper được ghi vào bảng log và `.ae-codex/library/launcher-errors.log`.
+Codex AE tự liên kết với cấu hình Codex của tài khoản Windows trên máy nhận;
+không mang theo tài khoản/API key của máy nguồn. Gọi tool từ Codex Desktop
+không cần CLI riêng hoặc tiến trình app-server riêng của panel.
+Sau cài đặt tải lại MCP hoặc mở lại Codex một lần. Thiếu Node.js 20+ hoặc
+PowerShell 7 sẽ có hướng dẫn trong Codex AE.
+Đây là bộ cài offline: cập nhật bằng gói ZIP mới. Xem
+[hướng dẫn đóng gói](docs/distribution/README.md) để biết cách nạp panel/MCP.
+
+Kiểm tra đóng gói: `node tests/Test-AeDistribution.js`; kiểm tra cài đặt với
+payload vừa build: `pwsh -NoProfile -File tests/Test-AeDistributionInstaller.ps1 -PayloadRoot <đường-dẫn-payload>`.
+Các bài kiểm tra dùng thư mục giả lập, không cài đè panel hoặc cấu hình Codex thật.
+
+Khi cập nhật bản cũ có chat tích hợp, chờ lượt chat, yêu cầu chấp thuận và job AE
+hoàn tất trước. Chỉ dừng runtime nền thuộc bản cài khi đã rảnh; không ngắt Codex
+khác, không gửi lại yêu cầu đã chạy và không dùng gỡ cài đặt để cập nhật.
+
+## Bridge 1.18.1 — bộ chức năng AE dùng lại
 
 Bridge cài sẵn các chức năng có tham số để tạo/sửa composition, layer,
 animation, effect, media và render. Mỗi việc gửi tên chức năng cùng JSON;
 không sinh JSX cho mỗi lần làm. `jsx/` chỉ giữ **Codex Bridge.jsx**.
 
-Danh sách hoạt động có **42 công cụ dùng lại**. **805 script cũ là kho lưu trữ**,
+Danh sách hoạt động có **43 công cụ dùng lại**. **805 script cũ là kho lưu trữ**,
 không tính vào số công cụ và không xuất hiện trong tìm kiếm mặc định.
 Nhánh cũ có giá trị riêng của project trước nên không thay thế công cụ có
-tham số. Code AI/chat, chọn model, CEP UI và ElevenLabs của source tham khảo
-không được tích hợp. Codex hiện tại gọi các công cụ AE đã cài.
+tham số. Codex gọi trực tiếp các công cụ AE đã cài qua MCP; panel không chứa AI,
+chat, CEP UI hoặc ElevenLabs của source tham khảo.
 
 Bảng `.ae-codex/functions/external-ae-tool-mapping.json` đối chiếu đủ 50 thao tác
 AE của source tham khảo với tool hoặc plan hiện tại. `execute_script` được thay
@@ -22,14 +144,13 @@ Yêu cầu After Effects, Node.js và PowerShell 7. Trong AE, bật một lần:
 
 `Edit > Preferences > Scripting & Expressions > Allow Scripts to Write Files and Access Network`
 
-Nếu chưa có panel người dùng, chọn `File > Scripts > Install ScriptUI Panel...`
-và chọn `jsx/Codex Bridge.jsx`. Sau đó, từ workspace:
+Với source phát triển, chạy từ workspace (hỗ trợ cả cài mới và cập nhật):
 
 ~~~powershell
 pwsh -NoProfile -File .\tools\Install-AeFunctions.ps1
 ~~~
 
-Installer build, kiểm tra bundle, cập nhật panel trong AppData và đăng ký MCP
+Installer build, kiểm tra bundle, đặt loader panel trong AppData và đăng ký MCP
 `ae_functions` cho Codex. Project cũng có `.codex/config.toml` cho project
 được tin cậy. Đóng/mở lại **Window > Codex Bridge** để nạp panel mới;
 mở chat Codex mới hoặc tải lại MCP để nạp cấu hình công cụ.
@@ -58,6 +179,17 @@ pwsh -NoProfile -File .\tools\Get-AeFunctions.ps1
 node .\tools\Get-AeCapabilities.js search '{"query":"text","limit":10}'
 pwsh -NoProfile -File .\tools\Invoke-AeFunction.ps1 -Function project.inspect -ArgumentsJson '{}'
 ~~~
+
+Tool `app.memory` kiểm tra RAM AE, đặt hai tỷ lệ RAM bằng `operation: "configure"`
+hoặc giải phóng riêng cache ảnh bằng `operation: "purgeImages"`. Tool này chạy
+riêng và từ chối thay đổi khi đang render; không xóa Undo, cache đĩa hay dữ liệu
+project. Tỷ lệ RAM là thiết lập native của AE, không bảo đảm trần GB cho toàn bộ
+tiến trình và không có API đọc lại. Không tự dọn cache định kỳ.
+
+Bản 1.17.0 giữ công cụ/kết nối và giới hạn mỗi yêu cầu hoặc plan chụp tối đa 3 frame.
+Giao diện tái sử dụng bút/cọ, tránh tạo panel
+trùng khi nạp loader lại và giải phóng callback/ảnh của giao diện đã đóng. Cache khung hình
+và bộ nhớ plugin của AE vẫn phụ thuộc project và cài đặt Memory & Performance.
 
 `tools.list` mặc định `includeLegacy: false`. Catalog hoạt động ở
 `.ae-codex/functions/catalog.json`; bảng **Tools...** trong panel hiển thị
@@ -113,10 +245,14 @@ hay API JSX của panel riêng.
 pwsh -NoProfile -File .\tools\Invoke-AeFunction.ps1 -Function inspection.capture -ArgumentsJson '{}'
 ~~~
 
-`inspection.capture` nhận `times: [0, 2, 5]` hoặc `numFrames: 4`, tối đa 10 frame,
-không dùng cả hai. Thời gian từ 0 đến `duration - frameDuration`; frame mẫu
+`inspection.capture` nhận `times: [0, 2, 5]` hoặc `numFrames: 3`, không dùng cả hai.
+Mỗi yêu cầu hoặc plan chỉ có một bước chụp, tối đa 3 frame; plan vượt giới hạn bị
+từ chối trước khi sửa project. Thời gian từ 0 đến `duration - frameDuration`; frame mẫu
 không dùng mốc kết thúc loại trừ. Mặc định chụp tại thời gian viewer hiện tại,
 không đổi viewer time hay project.
+
+Không chụp liên tục hoặc tự động chụp khi kết nối. Chỉ kiểm tra hình ảnh sau
+thay đổi đáng kể khi cần; yêu cầu chỉ đọc/chỉnh chữ không cần render toàn bộ comp.
 
 Ảnh chỉ ghi vào `.ae-codex/inspection/<runId>/`, không ghi đè run cũ.
 Ảnh đầu `frame.png`, ảnh sau `frame-002.png`... cùng `manifest.json`.
@@ -148,8 +284,8 @@ Lịch sử ở `.ae-codex/bridge/logs/events.log` có xoay file.
 Tiến trình là những bước thực sự đã báo, không đoán phần trăm thao tác đang
 chặn AE. Lỗi ghi log không chạy lại job hay thay kết quả thực tế.
 
-Kiểm kê effect/audio/SFX là luồng riêng, làm mới lúc kết nối và mỗi 120 giây
-khi rảnh. Đọc `.ae-codex/library/current.json`, `library/USAGE.md` và catalog
+Kiểm kê effect/audio/SFX là luồng riêng, chỉ làm mới các nhóm đang bật khi bấm
+**Cập nhật thư viện**; kết nối nạp lại cache. Đọc `.ae-codex/library/current.json`, `library/USAGE.md` và catalog
 plugin trước khi chọn effect/SFX. Kiểm kê không import media hay sửa project.
 
 ## Bảo trì source và kho cũ

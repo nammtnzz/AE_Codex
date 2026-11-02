@@ -25,6 +25,7 @@ function Assert-Rejected([string]$Json, [string]$Label) {
 function Set-FixtureHeartbeat([string]$Version = '1.8.0') {
     [ordered]@{
         schema = 'codex-ae-heartbeat/v1'; bridgeVersion = $Version; state = 'running'
+        workspaceRoot = $testRoot
         timestampEpochMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); sessionNonce = 'fixture-session-0001'
         startupStage = 'ready'; startupPercent = 100; message = 'fixture'
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $fixtureBridge 'heartbeat.json') -Encoding utf8NoBOM
@@ -139,6 +140,16 @@ try {
     $oldVersion = Invoke-Fixture @('-Function', 'project.inspect')
     Assert-True ($oldVersion.ExitCode -ne 0 -and $oldVersion.Data.message -match '1.8.0') 'Old bridge must reject function jobs before dispatch.'
     Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $fixtureBridge 'inbox') -Filter '*.job').Count -eq 0) 'Version rejection must not dispatch.'
+    $passed += 1
+
+    Set-FixtureHeartbeat
+    $foreignHeartbeatPath = Join-Path $fixtureBridge 'heartbeat.json'
+    $foreignHeartbeat = Get-Content -Raw -LiteralPath $foreignHeartbeatPath | ConvertFrom-Json
+    $foreignHeartbeat.workspaceRoot = 'D:\other-install'
+    $foreignHeartbeat | ConvertTo-Json -Compress | Set-Content -LiteralPath $foreignHeartbeatPath -Encoding utf8NoBOM
+    $foreignWorkspace = Invoke-Fixture @('-Function', 'project.inspect')
+    Assert-True ($foreignWorkspace.ExitCode -ne 0 -and $foreignWorkspace.Data.message -match 'workspace') 'A heartbeat from another workspace must be rejected before dispatch.'
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $fixtureBridge 'inbox') -Filter '*.job').Count -eq 0) 'Workspace mismatch must not dispatch.'
     $passed += 1
 
     Set-FixtureHeartbeat

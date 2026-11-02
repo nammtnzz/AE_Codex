@@ -76,6 +76,20 @@ VALUE = "preserved"
     Assert-True $rejected 'A custom fixture config must never trigger actual global registration.'
     $passed += 1
 
+    # Setup can discover PowerShell 7 by its standard installation path even
+    # when it is absent from PATH; registration must retain that running host.
+    [IO.File]::WriteAllText($fixtureConfig, '[mcp_servers.ae_functions]', $utf8)
+    $runningPwsh = (Get-Process -Id $PID).Path
+    $nodeDirectory = Split-Path -Parent (Get-Command node -CommandType Application | Select-Object -First 1).Source
+    $originalPath = $env:PATH
+    try {
+        $env:PATH = $nodeDirectory
+        Assert-True ($null -eq (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue)) 'PATH isolation fixture still exposes pwsh.'
+        $withoutPwshPath = & $runningPwsh -NoProfile -File (Join-Path $workspaceRoot 'tools/Install-AeFunctionsMcp.ps1') -SkipRegistration -ConfigPath $fixtureConfig | ConvertFrom-Json
+        Assert-True ($LASTEXITCODE -eq 0 -and $withoutPwshPath.state -eq 'success' -and $withoutPwshPath.powershellPath -ieq $runningPwsh) 'MCP registration helper requires pwsh on PATH despite running in PowerShell 7.'
+    } finally { $env:PATH = $originalPath }
+    $passed += 1
+
     # Exercise unified setup order using local stubs; no AE user files or Codex config are touched.
     Copy-Item -LiteralPath (Join-Path $workspaceRoot 'tools/Install-AeFunctions.ps1') -Destination (Join-Path $fixtureTools 'Install-AeFunctions.ps1')
     [IO.File]::WriteAllText((Join-Path $fixtureTools 'Build-AeScriptBundle.js'), @'
@@ -92,7 +106,7 @@ Add-Content -LiteralPath (Join-Path $PSScriptRoot '../.ae-codex/order.log') -Val
 Add-Content -LiteralPath (Join-Path $PSScriptRoot '../.ae-codex/order.log') -Value 'mcp'
 @{state='success';fixture=$true} | ConvertTo-Json
 '@, $utf8)
-    $installed = & (Join-Path $fixtureTools 'Install-AeFunctions.ps1') -VersionFolder '26.5' | ConvertFrom-Json -Depth 32
+    $installed = & (Join-Path $fixtureTools 'Install-AeFunctions.ps1') -VersionFolder '26.5' -SkipBackgroundService | ConvertFrom-Json -Depth 32
     $orderPath = Join-Path $fixtureRoot '.ae-codex/order.log'
     Assert-True (($installed.state -eq 'success') -and ($installed.schema -eq 'codex-ae-functions-install/v1')) 'Unified installer must return one structured JSON result.'
     Assert-True (([IO.File]::ReadAllText($orderPath).Replace("`r", '')) -ceq "build`npanel`nmcp`n") 'Unified setup order must be build, verified panel, then MCP.'

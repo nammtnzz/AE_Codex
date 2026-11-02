@@ -19,6 +19,7 @@ function integer(value, fallback, min, max, label) {
     return value;
 }
 function createCapabilitiesApi(workspaceRoot = path.resolve(__dirname, "..")) {
+    const canonicalRoot = path.resolve(workspaceRoot).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
     const files = {
         catalog: path.join(workspaceRoot, ".ae-codex/functions/catalog.json"),
         capabilities: path.join(workspaceRoot, ".ae-codex/functions/capabilities.json"),
@@ -160,14 +161,22 @@ function createCapabilitiesApi(workspaceRoot = path.resolve(__dirname, "..")) {
         const ageMs = heartbeat && Number.isFinite(heartbeat.timestampEpochMs) ? Date.now() - heartbeat.timestampEpochMs : null;
         const certificateMatches = !!certificate && certificate.state === "success" && certificate.revision === data.catalog.revision &&
             certificate.branches === data.manifest.branches.length && certificate.fileBytes === data.bundleBytes && certificate.sha256 === data.bundleSha256;
+        const heartbeatRoot = typeof heartbeat?.workspaceRoot === "string" ? heartbeat.workspaceRoot : null;
+        const heartbeatRootCanonical = heartbeatRoot ? path.resolve(heartbeatRoot).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() : null;
+        const workspaceMatches = !!heartbeatRootCanonical && heartbeatRootCanonical === canonicalRoot;
+        const revisionMatches = !!heartbeat?.scripts && heartbeat.scripts.revision === data.catalog.revision;
+        const bridgeVersionMatches = !!heartbeat && heartbeat.bridgeVersion === data.catalog.bridgeVersion;
+        const fresh = ageMs !== null && ageMs >= 0 && ageMs < 15000 && heartbeat?.state === "running" &&
+            workspaceMatches && bridgeVersionMatches && revisionMatches;
+        const connectionState = fresh ? "running" : heartbeat?.state === "running" ? "stale" : heartbeat?.state || "unknown";
         return { schema: "codex-ae-capability-status/v1", revision: data.catalog.revision,
             functions: data.catalog.functions.length, activeTools: data.catalog.functions.length, scripts: data.manifest.branches.length, archivedScripts: data.manifest.branches.length,
             coverage: data.manifest.coverage, summary: data.manifest.summary,
             dispatchMappings: { mapped: data.entries.length, active: data.catalog.functions.length, archived: data.manifest.branches.length, complete: true, mode: "reusable-tools-with-separate-legacy-archive" },
             installation: { certificateMatches, verifiedAtUtc: certificate?.verifiedAtUtc || null },
-            connection: { fresh: ageMs !== null && ageMs >= 0 && ageMs < 15000, ageMs,
-                state: heartbeat?.state || "unknown", bridgeVersion: heartbeat?.bridgeVersion || null,
-                revisionMatches: !!heartbeat?.scripts && heartbeat.scripts.revision === data.catalog.revision,
+            connection: { fresh, ageMs, workspaceRoot: heartbeatRoot,
+                workspaceMatches, state: connectionState, bridgeVersion: heartbeat?.bridgeVersion || null,
+                bridgeVersionMatches, revisionMatches,
                 reportedBranches: heartbeat?.scripts?.total ?? null },
             runtimeVerified: false,
             explanation: "Complete mapping and static validation do not prove a historical script is suitable for the open project. Scripts were not executed by this scan." };

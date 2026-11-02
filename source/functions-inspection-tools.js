@@ -134,16 +134,16 @@
         }
         fail("After Effects did not publish an inspection PNG within 5000 ms");
     }
-    register("inspection.capture", "Export current or sampled composition frames to this bridge run's inspection folder; does not save or import project data", false,
-        { comp: "optional comp selector", times: "optional 1..10 explicit seconds in valid frame range; cannot combine with numFrames", numFrames: "optional integer 1..10 evenly sampled frames; default captures current time" }, function (a, refs) {
+    register("inspection.capture", "Export the current frame by default, or up to 3 sampled frames; at most one capture call per request to limit preview rendering; does not save or import project data", false,
+        { comp: "optional comp selector", times: "optional 1..3 explicit seconds in valid frame range; cannot combine with numFrames", numFrames: "optional integer 1..3 evenly sampled frames; default captures only the current time" }, function (a, refs) {
             var i;
             selectors(a, refs, false);
             if (has(a, "times") && has(a, "numFrames")) { fail("Use args.times or args.numFrames, not both"); }
             if (has(a, "times")) {
-                if (!array(a.times) || !a.times.length || a.times.length > 10) { fail("args.times must contain 1 to 10 numeric times"); }
+                if (!array(a.times) || !a.times.length || a.times.length > 3) { fail("args.times must contain 1 to 3 numeric times"); }
                 for (i = 0; i < a.times.length; i += 1) { number(a.times[i], "args.times[" + i + "]", 0, 10800); }
             }
-            optional(a, "numFrames", function (v, p) { whole(v, p, 1, 10); });
+            optional(a, "numFrames", function (v, p) { whole(v, p, 1, 3); });
         }, function (a, refs, entry) {
             var comp = resolved(a, refs, entry, false).comp, context = entry && entry.context, root, runFolder, relativeRoot, maximumTime, frameDuration, times = [], count, i, time, filename, file, metadata, frames = [], manifest, temporary, destination, published;
             if (!context || context.schema !== "codex-ae-context/v1" || !/^[A-Za-z0-9-]{8,80}$/.test(context.runId || "")) { fail("inspection.capture requires a valid Codex AE Bridge run context"); }

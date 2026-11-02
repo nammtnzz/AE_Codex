@@ -116,8 +116,8 @@ test("Single capture preserves frame/manifest compatibility and never changes vi
     assert.equal(h.comp.time, beforeTime); assert.equal(h.state.projectWrites, 0); assert.equal(h.state.begin, 0);
 });
 test("Sampled frames include valid last frame and never the exclusive composition end", () => {
-    const h = host(), result = h.run("inspection.capture", { numFrames: 4 });
-    assert.equal(result.frames.length, 4); assert.equal(h.state.captures[0].time, 0);
+    const h = host(), result = h.run("inspection.capture", { numFrames: 3 });
+    assert.equal(result.frames.length, 3); assert.equal(h.state.captures[0].time, 0);
     assert.equal(h.state.captures.at(-1).time, h.comp.duration - h.comp.frameDuration);
     assert.ok(h.state.captures.every(capture => capture.time >= 0 && capture.time < h.comp.duration));
     assert.ok(result.frames[1].frameRelativePath.endsWith("frame-002.png"));
@@ -131,11 +131,30 @@ test("Default viewer time is clamped to the last valid frame; explicit invalid t
 });
 test("Explicit times and tool input bounds validate before any capture", () => {
     const h = host();
-    for (const args of [{ times: [], numFrames: 1 }, { times: [] }, { times: Array(11).fill(0) }, { times: [NaN] }, { numFrames: 11 }, { numFrames: 1.5 }, { outputPath: "C:/elsewhere/frame.png" }]) {
+    for (const args of [{ times: [], numFrames: 1 }, { times: [] }, { times: Array(4).fill(0) }, { times: [NaN] }, { numFrames: 4 }, { numFrames: 1.5 }, { outputPath: "C:/elsewhere/frame.png" }]) {
         assert.throws(() => h.run("inspection.capture", args));
     }
     assert.equal(h.state.filesystemWrites, 0);
     const result = h.run("inspection.capture", { times: [0, 2] }); assert.deepEqual(result.frames.map(frame => frame.timeSeconds), [0, 2]);
+});
+
+test("Capture catalog advertises the three-frame bound and default remains one viewer frame", () => {
+    const h = host(), descriptor = clean(h.api.list(false)).find(item => item.name === "inspection.capture");
+    assert.equal(descriptor.inputSchema.properties.numFrames.maximum, 3);
+    assert.equal(descriptor.inputSchema.properties.times.maxItems, 3);
+    assert.match(descriptor.description, /one capture call per request/);
+    const result = h.run("inspection.capture");
+    assert.equal(result.frames.length, 1); assert.equal(h.state.captures.length, 1);
+    assert.equal(h.state.captures[0].time, h.comp.time);
+});
+
+test("Repeated captures in a plan are rejected before edits, output writes or rendering", () => {
+    const h = host();
+    const steps = [call("effect.remove", { layer: { index: 1 }, effect: { index: 1 } }), call("inspection.capture"), call("inspection.capture")];
+    assert.throws(() => h.api.run(request(steps), h.context), /Only one inspection.capture call/);
+    assert.equal(h.state.captures.length, 0); assert.equal(h.state.filesystemWrites, 0);
+    assert.equal(h.state.projectWrites, 0); assert.equal(h.state.begin, 0);
+    assert.equal(h.effects.numProperties, 2);
 });
 test("Capture requires trusted context and refuses traversal, aliases, old run folders and overwrites", () => {
     const h = host();

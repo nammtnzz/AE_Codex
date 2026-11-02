@@ -163,6 +163,30 @@ try {
         "Same-header, same-size payload corruption must invalidate installation verification, including a warmed cache");
     groups++;
 
+    // A running marker is not a live connection unless its timestamp, workspace,
+    // bridge version and catalog revision all match the installed runtime.
+    api = makeFixture();
+    const heartbeatPath = path.join(fixture, ".ae-codex/bridge/heartbeat.json");
+    fs.mkdirSync(path.dirname(heartbeatPath), { recursive: true });
+    const heartbeat = {
+        schema: "codex-ae-heartbeat/v1", state: "running", bridgeVersion: "1.8.0",
+        workspaceRoot: fixture, timestampEpochMs: Date.now(), sessionNonce: "fixture-session-0001",
+        scripts: { revision, total: names.length }
+    };
+    fs.writeFileSync(heartbeatPath, json(heartbeat));
+    assert.equal(api.capabilityStatus().connection.fresh, true);
+    assert.equal(api.capabilityStatus().connection.state, "running");
+    heartbeat.timestampEpochMs = Date.now() - 60000;
+    fs.writeFileSync(heartbeatPath, json(heartbeat));
+    assert.equal(api.capabilityStatus().connection.fresh, false);
+    assert.equal(api.capabilityStatus().connection.state, "stale");
+    heartbeat.timestampEpochMs = Date.now(); heartbeat.workspaceRoot = path.join(fixture, "other");
+    fs.writeFileSync(heartbeatPath, json(heartbeat));
+    const mismatched = api.capabilityStatus().connection;
+    assert.equal(mismatched.fresh, false);
+    assert.equal(mismatched.workspaceMatches, false);
+    groups++;
+
     // Real installed inventory coverage. Read manifests/source only; never dispatch to AE.
     const inventory = JSON.parse(fs.readFileSync(path.join(root, "source/script-inventory.json"), "utf8")).names;
     const actualSource = expandSource(JSON.parse(fs.readFileSync(path.join(root, "source/scripts.json"), "utf8"))).branches;

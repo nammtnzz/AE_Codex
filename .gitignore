@@ -2,9 +2,10 @@
 !.ae-codex/.gitkeep
 
 # Local Codex configuration and generated project media
-.codex/config.toml
+.codex/
 /assets/
 /outputs/
+/CodexAE-*.zip
 
 # Dependencies, caches and machine-local files
 node_modules/
@@ -12,6 +13,10 @@ __pycache__/
 *.py[cod]
 .DS_Store
 Thumbs.db
+/tools/Codex AE Background.exe
+/Codex AE.exe
+/HUONG-DAN.txt
+/.Codex-AE-entry-*.exe
 
 # Credentials and local environment overrides
 .env

@@ -181,18 +181,22 @@
             if (cursor < queue.length) { truncated = true; }
             return { rootCompId: rootComp.id, compositions: compositions, layersRead: count, truncated: truncated };
         });
-    register("media.import", "Import a specified existing media file into the open project", true,
+    register("media.import", "Import existing media or an .aep/.aepx project as a folder into the open project", true,
         { path: "absolute source file path", sequence: "optional boolean; default false", forceAlphabetical: "optional boolean; requires sequence:true" }, function (a) {
             projectToolsPath(a.path, "args.path"); optional(a, "sequence", boolValue); optional(a, "forceAlphabetical", boolValue);
             if (a.forceAlphabetical && a.sequence !== true) { fail("forceAlphabetical requires sequence:true"); }
+            if (/\.aepx?$/i.test(a.path) && (a.sequence || a.forceAlphabetical)) { fail("Project import does not support sequence flags"); }
         }, function (a) {
-            var p = project(), file = projectToolsFile(a.path, "args.path", false), settings, item;
+            var p = project(), file = projectToolsFile(a.path, "args.path", false), settings, item, importingProject = /\.aepx?$/i.test(a.path), importType;
             if (!file.exists) { fail("Media file does not exist: " + a.path); }
             if (typeof ImportOptions === "undefined" || typeof p.importFile !== "function") { fail("After Effects media import API is unavailable"); }
+            if (importingProject && p.file && projectToolsPathKey(file) === projectToolsPathKey(p.file)) { fail("Cannot import the current project into itself"); }
             settings = new ImportOptions(file);
+            if (importingProject && (typeof ImportAsType === "undefined" || typeof ImportAsType.PROJECT === "undefined" || typeof settings.canImportAs !== "function")) { fail("After Effects project import API is unavailable"); }
             if (typeof ImportAsType !== "undefined" && typeof settings.canImportAs === "function") {
-                if (!settings.canImportAs(ImportAsType.FOOTAGE)) { fail("The selected file cannot be imported as footage"); }
-                settings.importAs = ImportAsType.FOOTAGE;
+                importType = importingProject ? ImportAsType.PROJECT : ImportAsType.FOOTAGE;
+                if (!settings.canImportAs(importType)) { fail("The selected file cannot be imported as " + (importingProject ? "a project" : "footage")); }
+                settings.importAs = importType;
             }
             settings.sequence = a.sequence === true;
             if (has(a, "forceAlphabetical")) { settings.forceAlphabetical = a.forceAlphabetical; }

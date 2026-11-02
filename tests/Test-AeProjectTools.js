@@ -44,7 +44,7 @@ function host() {
     const project = { list: [], file: new File("C:/project/current.aep"), bitsPerChannel: 16, dirty: false, activeItem: null,
         get numItems() { return this.list.length; }, item(index) { return this.list[index - 1]; },
         items: { addComp(...args) { const comp = new CompItem(...args); project.list.push(comp); return comp; } },
-        importFile(settings) { state.imported.push(settings); const item = new FootageItem(settings.file.name, settings.file); project.list.push(item); return item; },
+        importFile(settings) { state.imported.push(settings); const item = settings.importAs === 2 ? new FolderItem(settings.file.name) : new FootageItem(settings.file.name, settings.file); project.list.push(item); return item; },
         save(destination) { state.saves++; if (state.saveFail) { throw new Error("save failure"); } if (destination) { this.file = destination; } files.add(key(this.file.fsName)); }
     };
     const comp = project.items.addComp("Main"), nested = project.items.addComp("Nested"), folder = new FolderItem("Assets"), footage = new FootageItem("Clip", new File("C:/media/clip.mp4"));
@@ -68,7 +68,7 @@ function host() {
     project.renderQueue = queue;
     class ImportOptions { constructor(file) { this.file = file; } canImportAs() { return state.canImport !== false; } }
     const sandbox = { app: { version: "26.5", project, beginUndoGroup() { state.begin++; }, endUndoGroup() { state.end++; }, executeCommand(id) { state.commands.push(id); } },
-        File, ImportOptions, ImportAsType: { FOOTAGE: 1 }, CompItem, FootageItem, FolderItem, SolidSource, RQItemStatus: statuses,
+        File, ImportOptions, ImportAsType: { FOOTAGE: 1, PROJECT: 2 }, CompItem, FootageItem, FolderItem, SolidSource, RQItemStatus: statuses,
         $: { global: {} } };
     vm.createContext(sandbox); vm.runInContext(source, sandbox);
     const api = sandbox.$.global.__codexAeFunctionsV1;
@@ -188,6 +188,20 @@ test("import checks file availability and sequence flags without leaking undo gr
     run("media.import", { path: "C:/media/frames0001.png", sequence: true, forceAlphabetical: true });
     assert.equal(state.imported[0].sequence, true); assert.equal(state.imported[0].forceAlphabetical, true);
 });
+test("project import returns a folder, preserves current project and rejects self-import and sequence flags", () => {
+    const { api, run, project, files, state } = host();
+    files.add("c:/project/source.aep"); files.add("c:/project/source.aepx");
+    assert.equal(run("media.import", { path: "C:/project/source.aep" }).type, "folder");
+    assert.equal(run("media.import", { path: "C:/project/source.aepx" }).type, "folder");
+    assert.equal(state.imported[0].importAs, 2);
+    assert.equal(project.file.fsName, "C:/project/current.aep");
+    assert.throws(() => run("media.import", { path: "C:/project/current.aep" }), /itself/);
+    assert.throws(() => api.validate(request([call("media.import", { path: "C:/project/source.aep", sequence: true })])), /sequence/);
+    state.canImport = false;
+    assert.throws(() => run("media.import", { path: "C:/project/source.aep" }), /cannot be imported as a project/);
+    assert.equal(state.imported.length, 2); assert.equal(state.begin, state.end);
+});
+
 test("media layers reject folders, ambiguous names, self-precomps and partial timing ranges", () => {
     const { api, run, project, folder, comp, nested, footage } = host();
     assert.throws(() => run("layer.media.add", { item: { id: folder.id } }), /Only footage/);

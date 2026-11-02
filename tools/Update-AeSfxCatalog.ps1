@@ -222,12 +222,9 @@ try {
         $config = Read-Json -Path $configPath
         if ((Get-JsonProperty $config 'schemaVersion') -ne 1) { throw 'Unsupported library config schemaVersion; expected 1.' }
     } else {
-        $defaultRoots = @('E:\Audio\SFX')
-        $downloadsRoot = Join-Path ([System.Environment]::GetFolderPath('UserProfile')) 'Downloads'
-        if ([System.IO.Directory]::Exists($downloadsRoot)) { $defaultRoots += $downloadsRoot }
         $config = [pscustomobject]@{
             schemaVersion = 1
-            sfx = [pscustomobject]@{ roots = $defaultRoots; extensions = $allowedExtensions }
+            sfx = [pscustomobject]@{ enabled = $false; roots = @(); extensions = $allowedExtensions }
         }
         Write-AtomicJson -Path $configPath -Object $config
     }
@@ -236,10 +233,21 @@ try {
     if ($PSBoundParameters.ContainsKey('Roots')) {
         $validatedRoots = Resolve-CatalogRoots -ConfiguredRoots $Roots
         $sfxConfig | Add-Member -NotePropertyName roots -NotePropertyValue $validatedRoots -Force
+        # Supplying folders explicitly is the standalone opt-in route. Bridge
+        # requests never accept folders and cannot change this preference.
+        $sfxConfig | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
         Write-AtomicJson -Path $configPath -Object $config
     }
-    $scanRoots = Resolve-CatalogRoots -ConfiguredRoots (Get-JsonProperty $sfxConfig 'roots' @())
-    $extensions = @(Get-JsonProperty $sfxConfig 'extensions' $allowedExtensions)
+    # A pre-existing configuration without this flag retains its watched-folder
+    # behavior. Fresh installations opt out until folders are selected.
+    $sfxEnabled = Get-JsonProperty $sfxConfig 'enabled' $true
+    if ($sfxEnabled -isnot [bool]) { throw 'Library sfx.enabled must be a boolean.' }
+    $scanRoots = @()
+    $extensions = $allowedExtensions
+    if ($sfxEnabled) {
+        $scanRoots = Resolve-CatalogRoots -ConfiguredRoots (Get-JsonProperty $sfxConfig 'roots' @())
+        $extensions = @(Get-JsonProperty $sfxConfig 'extensions' $allowedExtensions)
+    }
     $extensionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($extension in $extensions) {
         if ($extension -isnot [string] -or $allowedExtensions -notcontains $extension.ToLowerInvariant()) {
@@ -250,20 +258,30 @@ try {
 
     $cachePath = Join-Path $libraryRoot 'sfx-cache.jsonl'
     $cached = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+    if ($sfxEnabled -and (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
         try {
             Assert-SafeAncestry -Path $cachePath
+            # Parse the JSONL in one native JSON pass. Invoking a PowerShell
+            # command and property helper for each of thousands of unchanged
+            # records consumed most of the idle refresh time.
+            $cacheLines = [System.Collections.Generic.List[string]]::new()
             foreach ($line in [System.IO.File]::ReadLines($cachePath)) {
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                $entry = $line | ConvertFrom-Json -ErrorAction Stop
-                if ((Get-JsonProperty $entry 'schemaVersion') -ne 1 -or (Get-JsonProperty $entry 'path') -isnot [string]) {
-                    throw 'Cache record has an unsupported schema.'
-                }
-                # ConvertFrom-Json in PowerShell 7 can convert ISO timestamps to
-                # DateTime objects; normalize them for exact metadata comparison.
-                if ($entry.modifiedUtc -is [datetime]) { $entry.modifiedUtc = $entry.modifiedUtc.ToUniversalTime().ToString('o') }
-                $cached[$entry.path] = $entry
+                if (-not [string]::IsNullOrWhiteSpace($line)) { $cacheLines.Add($line) }
             }
+            if ($cacheLines.Count -gt 0) {
+                $cacheRecords = ConvertFrom-Json -InputObject ('[' + [string]::Join(',', $cacheLines) + ']') -AsHashtable -NoEnumerate -ErrorAction Stop
+                foreach ($entry in $cacheRecords) {
+                    if ($entry -isnot [System.Collections.IDictionary] -or $entry['schemaVersion'] -ne 1 -or $entry['path'] -isnot [string]) {
+                        throw 'Cache record has an unsupported schema.'
+                    }
+                    # Preserve exact UTC comparison on all supported PS 7
+                    # versions, including those that parse ISO strings as dates.
+                    if ($entry['modifiedUtc'] -is [datetime]) { $entry['modifiedUtc'] = $entry['modifiedUtc'].ToUniversalTime().ToString('o') }
+                    $cached[$entry['path']] = $entry
+                }
+                $cacheRecords = $null
+            }
+            $cacheLines = $null
         } catch {
             $cached.Clear()
             Add-CatalogWarning "Incremental cache could not be read; rebuilding metadata: $($_.Exception.Message)"
@@ -277,6 +295,8 @@ try {
     $updatedCount = 0
     $skippedReparseCount = 0
     $skippedDirectoryCount = 0
+    $enumeratedDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $skippedOverlappingDirectoryCount = 0
     $pendingArchives = [System.Collections.Generic.List[object]]::new()
     $archivePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $pendingArchiveCount = 0
@@ -291,10 +311,15 @@ try {
         $pending.Push($root)
         while ($pending.Count -gt 0) {
             $directory = $pending.Pop()
+            if ($enumeratedDirectories.Contains($directory)) {
+                $skippedOverlappingDirectoryCount += 1
+                continue
+            }
             try {
                 # Repeat at scan time in case a folder changed after validation.
                 Assert-SafeAncestry -Path $directory
                 $children = [System.IO.DirectoryInfo]::new($directory).GetFileSystemInfos()
+                [void]$enumeratedDirectories.Add($directory)
             } catch {
                 $skippedDirectoryCount += 1
                 Add-CatalogWarning "Could not enumerate SFX folder: $directory. $($_.Exception.Message)"
@@ -332,11 +357,11 @@ try {
                     $modifiedUtc = $child.LastWriteTimeUtc.ToString('o')
                     $previous = $null
                     $unchanged = $cached.TryGetValue($child.FullName, [ref]$previous) -and
-                        (Get-JsonProperty $previous 'sizeBytes') -eq $child.Length -and
-                        (Get-JsonProperty $previous 'modifiedUtc') -ceq $modifiedUtc -and
-                        (Get-JsonProperty $previous 'root') -ceq $root -and
-                        (Get-JsonProperty $previous 'relativePath') -ceq $relative -and
-                        $null -ne (Get-JsonProperty $previous 'tags')
+                        $previous['sizeBytes'] -eq $child.Length -and
+                        $previous['modifiedUtc'] -ceq $modifiedUtc -and
+                        $previous['root'] -ceq $root -and
+                        $previous['relativePath'] -ceq $relative -and
+                        $null -ne $previous['tags']
                     if ($unchanged) {
                         $entry = $previous
                         $reusedCount += 1
@@ -387,7 +412,9 @@ try {
         }
         $catalogText = $textBuilder.ToString()
         Write-AtomicText -Path $catalogPath -Text $catalogText -Immutable
-        Write-AtomicText -Path $cachePath -Text $catalogText
+        # Opting out publishes an empty inventory without enumerating folders,
+        # reading the incremental cache, or erasing an existing user's cache.
+        if ($sfxEnabled) { Write-AtomicText -Path $cachePath -Text $catalogText }
     }
     $summary = [pscustomobject][ordered]@{
         schemaVersion = 1
@@ -395,6 +422,8 @@ try {
         requestId = $RequestId
         sessionId = $sessionId
         state = 'success'
+        enabled = $sfxEnabled
+        skipped = -not $sfxEnabled
         startedUtc = $startedUtc.ToString('o')
         completedUtc = [datetime]::UtcNow.ToString('o')
         durationMs = [math]::Round(([datetime]::UtcNow - $startedUtc).TotalMilliseconds)
@@ -407,6 +436,8 @@ try {
         catalogSessionId = $catalogSessionId
         skippedReparseCount = $skippedReparseCount
         skippedDirectoryCount = $skippedDirectoryCount
+        enumeratedDirectoryCount = $enumeratedDirectories.Count
+        skippedOverlappingDirectoryCount = $skippedOverlappingDirectoryCount
         pendingArchiveCount = $pendingArchiveCount
         pendingArchives = $pendingArchives.ToArray()
         pendingArchivesOmittedCount = $pendingArchiveCount - $pendingArchives.Count
@@ -435,6 +466,8 @@ try {
         schemaVersion = 1
         kind = 'disk-sfx'
         state = 'success'
+        enabled = $sfxEnabled
+        skipped = -not $sfxEnabled
         requestId = $RequestId
         sessionId = $sessionId
         completedUtc = $summary.completedUtc
@@ -458,6 +491,8 @@ try {
         schemaVersion = 1
         kind = 'disk-sfx'
         state = 'success'
+        enabled = $sfxEnabled
+        skipped = -not $sfxEnabled
         requestId = $RequestId
         sessionId = $sessionId
         completedUtc = $summary.completedUtc

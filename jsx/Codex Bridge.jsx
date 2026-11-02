@@ -1,9 +1,20 @@
 #target aftereffects
 #targetengine "codexAeBridge"
-// CODEX_AE_BUNDLE_V2	90e4a9910b975a7b7c116477c225a415c81e399437d798955d92bbafc1c8ee4a	2129868	202971	123680	3779855818	805
+// CODEX_AE_BUNDLE_V2	9e8dabeb625e89740220938945db33751d0eca5680a7aa28f85075d558c505d1	2205931	254603	123634	56163833	805
 /* ES3 runtime. Branch bodies remain inert in the indexed comment at EOF. */
 (function () {
-    var ROOT = "C:/Users/nguye/AE_Codex";
+    function workspaceRoot() {
+        var configured = $.global.__CODEX_AE_WORKSPACE_ROOT__, script;
+        if (typeof configured === "string" && configured.replace(/^\s+|\s+$/g, "")) {
+            return (new Folder(configured)).fsName.replace(/\\/g, "/").replace(/\/$/, "");
+        }
+        script = new File($.fileName);
+        if (String(script.parent.name).toLowerCase() !== "jsx") {
+            throw new Error("Open Codex Bridge through its installed loader or the workspace jsx folder.");
+        }
+        return script.parent.parent.fsName.replace(/\\/g, "/").replace(/\/$/, "");
+    }
+    var ROOT = workspaceRoot();
     var PATH = ROOT + "/jsx/Codex Bridge.jsx";
     var nativeEvalFile = $.evalFile;
     function checksum(text) {
@@ -606,6 +617,7 @@
         numeric.properties[byId ? "id" : "index"] = { type: "integer", minimum: 1 }; options.push(numeric); return { oneOf: options };
     }
     function inputSchema(definition) {
+        if (definition.options.nativeInputSchema) { return parse(stringify(definition.options.nativeInputSchema)); }
         var requiredFields = { "comp.rebuildMedia": "name", "comp.create": "name", "comp.seek": "time", "layer.inspect": "layer", "layer.text.create": "text", "layer.solid.create": "color", "layer.duplicate": "layer", "layer.update": "layer", "layer.parent": "layer|parent", "property.list": "layer", "property.get": "layer|path", "property.set": "layer|path|value", "property.keyframes": "layer|path|keys", "property.expression": "layer|path|expression", "effect.add": "layer|matchName", "layer.shape.create": "shape", "script.run": "branch" };
         var result = { type: "object", properties: {}, required: requiredFields[definition.name] ? requiredFields[definition.name].split("|") : [], additionalProperties: false }, names = keys(definition.args), i, name, schema;
         var numeric = "|width|height|pixelAspect|duration|frameRate|sampleRate|resumeCompId|workAreaStart|workAreaDuration|displayStartTime|fontSize|startTime|inPoint|outPoint|label|time|roundness|strokeWidth|maxItems|maxLayers|maxProperties|";
@@ -638,8 +650,8 @@
             if (name === "path" && (definition.name === "media.import" || definition.name === "project.save")) { schema = { type: "string", minLength: 1, maxLength: 4096 }; }
             if (name === "outputPath") { schema = { type: "string", minLength: 1, maxLength: 4096 }; }
             if (name === "zoom" || name === "intensity" || name === "points" || name === "outerRadius" || name === "innerRadius" || name === "shapeRotation") { schema = { type: "number" }; }
-            if (name === "numFrames") { schema = { type: "integer", minimum: 1, maximum: 10 }; }
-            if (name === "times") { schema = { type: "array", minItems: 1, maxItems: 10, items: { type: "number", minimum: 0 } }; }
+            if (name === "numFrames") { schema = { type: "integer", minimum: 1, maximum: 3 }; }
+            if (name === "times") { schema = { type: "array", minItems: 1, maxItems: 3, items: { type: "number", minimum: 0 } }; }
             if (name === "type" && definition.name === "project.search") { schema = { type: "string", "enum": ["all", "composition", "footage", "solid", "folder"] }; }
             if (name === "type" && definition.name === "layer.camera.create") { schema = { type: "string", "enum": ["one-node", "two-node"] }; }
             if (name === "type" && definition.name === "layer.light.create") { schema = { type: "string", "enum": ["point", "spot", "parallel", "ambient"] }; }
@@ -656,6 +668,49 @@
     register("system.info", "Read host version and connection context", false, {}, function () {}, function () {
         return { runtimeVersion: VERSION, host: "After Effects", version: String(app.version || ""), projectOpen: !!app.project, activeComp: app.project && isComp(app.project.activeItem) ? compSummary(app.project.activeItem) : null };
     });
+    function memoryBytes() {
+        if (typeof app === "undefined" || !app) { fail("After Effects memory information is unavailable"); }
+        var value = app.memoryInUse;
+        if (!finite(value) || value < 0) { fail("After Effects memoryInUse must report a nonnegative byte count"); }
+        return value;
+    }
+    function memoryNativeMethod(type) { return type === "function" || type === "unknown"; }
+    function memoryPreflight(a) {
+        var operation = has(a, "operation") ? a.operation : "inspect", bytes = memoryBytes(), p, queue;
+        if (operation !== "inspect") {
+            p = app.project;
+            if (p) {
+                queue = p.renderQueue;
+                if (!queue || typeof queue.rendering !== "boolean") { fail("Cannot verify the After Effects render queue is idle"); }
+                if (queue.rendering) { fail("Memory configuration and cache release are unavailable while After Effects is rendering"); }
+            }
+            if (operation === "configure" && !memoryNativeMethod(typeof app.setMemoryUsageLimits)) { fail("After Effects setMemoryUsageLimits is unavailable"); }
+            if (operation === "purgeImages" && (!memoryNativeMethod(typeof app.purge) || typeof PurgeTarget === "undefined" || typeof PurgeTarget.IMAGE_CACHES === "undefined" || PurgeTarget.IMAGE_CACHES === null)) { fail("After Effects IMAGE_CACHES purge is unavailable"); }
+        }
+        return bytes;
+    }
+    var memoryOperationSchema = { type: "string", "enum": ["inspect", "configure", "purgeImages"], "default": "inspect", description: "Inspect memory by default; configure application percentages or release only cached image data when explicitly requested" };
+    var memoryPercentageSchema = { type: "number", minimum: 0, maximum: 100, description: "Native AE percentage; required only for configure, with no supported readback or hard byte-limit guarantee" };
+    register("app.memory", "Inspect native AE memory use, configure its memory percentages, or release image cache without clearing Undo or disk cache; never changes project data", true, { operation: "optional inspect (default), configure or purgeImages", imageCachePercentage: "configure only: required finite percentage 0..100 for the image cache", maximumMemoryPercentage: "configure only: required finite percentage 0..100 for maximum usable memory; not a hard process byte cap" }, function (a) {
+        var operation = has(a, "operation") ? a.operation : "inspect";
+        if (operation !== "inspect" && operation !== "configure" && operation !== "purgeImages") { fail("args.operation must be inspect, configure or purgeImages"); }
+        if (operation === "configure") {
+            number(a.imageCachePercentage, "args.imageCachePercentage", 0, 100);
+            number(a.maximumMemoryPercentage, "args.maximumMemoryPercentage", 0, 100);
+        } else if (has(a, "imageCachePercentage") || has(a, "maximumMemoryPercentage")) { fail("Memory percentages are accepted only for args.operation configure"); }
+    }, function (a) {
+        var operation = has(a, "operation") ? a.operation : "inspect", before = memoryPreflight(a), result;
+        if (operation === "configure") { app.setMemoryUsageLimits(a.imageCachePercentage, a.maximumMemoryPercentage); }
+        else if (operation === "purgeImages") { app.purge(PurgeTarget.IMAGE_CACHES); }
+        result = { operation: operation, beforeBytes: before, afterBytes: memoryBytes(), limitsReadbackAvailable: false, projectModified: false, preservesUndo: true, preservesDiskCache: true };
+        if (operation === "configure") { result.requestedLimits = { imageCachePercentage: a.imageCachePercentage, maximumMemoryPercentage: a.maximumMemoryPercentage }; }
+        if (operation === "purgeImages") { result.purgedTarget = "IMAGE_CACHES"; result.releasedBytes = Math.max(0, before - result.afterBytes); }
+        return result;
+    }, "", { undo: false, exclusive: true, nativeInputSchema: { type: "object", properties: { operation: memoryOperationSchema, imageCachePercentage: memoryPercentageSchema, maximumMemoryPercentage: memoryPercentageSchema }, required: [], additionalProperties: false, oneOf: [
+        { type: "object", properties: { operation: { type: "string", "enum": ["inspect"] } }, additionalProperties: false },
+        { type: "object", properties: { operation: { type: "string", "enum": ["configure"] }, imageCachePercentage: memoryPercentageSchema, maximumMemoryPercentage: memoryPercentageSchema }, required: ["operation", "imageCachePercentage", "maximumMemoryPercentage"], additionalProperties: false },
+        { type: "object", properties: { operation: { type: "string", "enum": ["purgeImages"] } }, required: ["operation"], additionalProperties: false }
+    ] } });
     register("tools.list", "List reusable installed tools; archived scripts require explicit includeLegacy:true", false, { includeLegacy: "optional boolean; default false, archive maintenance only" }, function (a) { optional(a, "includeLegacy", boolValue); }, function (a) { return list(a.includeLegacy); });
     register("project.inspect", "Read project items without changing the project", false, { maxItems: "optional integer 1..5000; default 100" }, function (a) { optional(a, "maxItems", function (v, p) { whole(v, p, 1, 5000); }); }, function (a) {
         var p = project(), out = [], limit = a.maxItems || 100, i, item, projectFile = p.file, summary, fields = ["width", "height", "duration", "frameRate", "numLayers", "numItems"], j, value, file, color;
@@ -1283,18 +1338,22 @@
             if (cursor < queue.length) { truncated = true; }
             return { rootCompId: rootComp.id, compositions: compositions, layersRead: count, truncated: truncated };
         });
-    register("media.import", "Import a specified existing media file into the open project", true,
+    register("media.import", "Import existing media or an .aep/.aepx project as a folder into the open project", true,
         { path: "absolute source file path", sequence: "optional boolean; default false", forceAlphabetical: "optional boolean; requires sequence:true" }, function (a) {
             projectToolsPath(a.path, "args.path"); optional(a, "sequence", boolValue); optional(a, "forceAlphabetical", boolValue);
             if (a.forceAlphabetical && a.sequence !== true) { fail("forceAlphabetical requires sequence:true"); }
+            if (/\.aepx?$/i.test(a.path) && (a.sequence || a.forceAlphabetical)) { fail("Project import does not support sequence flags"); }
         }, function (a) {
-            var p = project(), file = projectToolsFile(a.path, "args.path", false), settings, item;
+            var p = project(), file = projectToolsFile(a.path, "args.path", false), settings, item, importingProject = /\.aepx?$/i.test(a.path), importType;
             if (!file.exists) { fail("Media file does not exist: " + a.path); }
             if (typeof ImportOptions === "undefined" || typeof p.importFile !== "function") { fail("After Effects media import API is unavailable"); }
+            if (importingProject && p.file && projectToolsPathKey(file) === projectToolsPathKey(p.file)) { fail("Cannot import the current project into itself"); }
             settings = new ImportOptions(file);
+            if (importingProject && (typeof ImportAsType === "undefined" || typeof ImportAsType.PROJECT === "undefined" || typeof settings.canImportAs !== "function")) { fail("After Effects project import API is unavailable"); }
             if (typeof ImportAsType !== "undefined" && typeof settings.canImportAs === "function") {
-                if (!settings.canImportAs(ImportAsType.FOOTAGE)) { fail("The selected file cannot be imported as footage"); }
-                settings.importAs = ImportAsType.FOOTAGE;
+                importType = importingProject ? ImportAsType.PROJECT : ImportAsType.FOOTAGE;
+                if (!settings.canImportAs(importType)) { fail("The selected file cannot be imported as " + (importingProject ? "a project" : "footage")); }
+                settings.importAs = importType;
             }
             settings.sequence = a.sequence === true;
             if (has(a, "forceAlphabetical")) { settings.forceAlphabetical = a.forceAlphabetical; }
@@ -1538,16 +1597,16 @@
         }
         fail("After Effects did not publish an inspection PNG within 5000 ms");
     }
-    register("inspection.capture", "Export current or sampled composition frames to this bridge run's inspection folder; does not save or import project data", false,
-        { comp: "optional comp selector", times: "optional 1..10 explicit seconds in valid frame range; cannot combine with numFrames", numFrames: "optional integer 1..10 evenly sampled frames; default captures current time" }, function (a, refs) {
+    register("inspection.capture", "Export the current frame by default, or up to 3 sampled frames; at most one capture call per request to limit preview rendering; does not save or import project data", false,
+        { comp: "optional comp selector", times: "optional 1..3 explicit seconds in valid frame range; cannot combine with numFrames", numFrames: "optional integer 1..3 evenly sampled frames; default captures only the current time" }, function (a, refs) {
             var i;
             selectors(a, refs, false);
             if (has(a, "times") && has(a, "numFrames")) { fail("Use args.times or args.numFrames, not both"); }
             if (has(a, "times")) {
-                if (!array(a.times) || !a.times.length || a.times.length > 10) { fail("args.times must contain 1 to 10 numeric times"); }
+                if (!array(a.times) || !a.times.length || a.times.length > 3) { fail("args.times must contain 1 to 3 numeric times"); }
                 for (i = 0; i < a.times.length; i += 1) { number(a.times[i], "args.times[" + i + "]", 0, 10800); }
             }
-            optional(a, "numFrames", function (v, p) { whole(v, p, 1, 10); });
+            optional(a, "numFrames", function (v, p) { whole(v, p, 1, 3); });
         }, function (a, refs, entry) {
             var comp = resolved(a, refs, entry, false).comp, context = entry && entry.context, root, runFolder, relativeRoot, maximumTime, frameDuration, times = [], count, i, time, filename, file, metadata, frames = [], manifest, temporary, destination, published;
             if (!context || context.schema !== "codex-ae-context/v1" || !/^[A-Za-z0-9-]{8,80}$/.test(context.runId || "")) { fail("inspection.capture requires a valid Codex AE Bridge run context"); }
@@ -1612,7 +1671,7 @@
         c.time=a.time;c.openInViewer();return compSummary(c);
     });
     function validate(request) {
-        var refs = {}, i, step, definition, allowed;
+        var refs = {}, i, step, definition, allowed, captureCalls = 0;
         exact(request, "schema|steps", "request");
         if (request.schema !== SCHEMA) { fail("request.schema must be " + SCHEMA); }
         if (!array(request.steps) || !request.steps.length || request.steps.length > 100) { fail("request.steps must contain 1 to 100 calls"); }
@@ -1625,6 +1684,10 @@
             definition = definitions[step["function"]]; allowed = keys(definition.args).join("|");
             if (definition.options.exclusive && request.steps.length !== 1) { fail(definition.name + " must be called alone, outside an edit plan"); }
             exact(step.args, allowed, "steps[" + i + "].args"); definition.check(step.args, refs);
+            if (definition.name === "inspection.capture") {
+                captureCalls += 1;
+                if (captureCalls > 1) { fail("Only one inspection.capture call is allowed per request; capture at most 3 frames in that call"); }
+            }
             if (has(step, "as")) {
                 if (!definition.resultKind) { fail("This function does not create a reference: " + definition.name); }
                 text(step.as, "steps[" + i + "].as", 64);
@@ -1638,6 +1701,7 @@
         var out = [], i, step, a, entry, definition, dynamicComp, dynamicLayer, property, j, priorMutation = false;
         for (i = 0; i < request.steps.length; i += 1) {
             step = request.steps[i]; a = step.args; definition = definitions[step["function"]]; entry = { step: step, definition: definition };
+            if (definition.name === "app.memory") { memoryPreflight(a); }
             dynamicComp = a.comp && has(a.comp, "ref"); dynamicLayer = a.layer && has(a.layer, "ref");
             if (definition.name === "project.inspect" || definition.name === "comp.create") { project(); }
             if (has(definition.args, "comp") && !dynamicComp) {
@@ -1708,14 +1772,68 @@
 (function (thisObject) {
     // Direct-run fallback can load the dispatcher without creating/stopping a panel.
     if ($.global.__CODEX_AE_BUNDLE_ONLY__) { return; }
+    if ($.global.__CODEX_AE_PANEL_HOST__ instanceof Panel) {
+        thisObject = $.global.__CODEX_AE_PANEL_HOST__;
+    }
     var GLOBAL_NAME = "__codexAeBridgeV1";
-    var BRIDGE_VERSION = "1.9.0";
-    var WORKSPACE_ROOT = "C:/Users/nguye/AE_Codex";
+    var BRIDGE_VERSION = "2.0.4";
+    function workspaceRoot() {
+        var configured = $.global.__CODEX_AE_WORKSPACE_ROOT__, script;
+        if (typeof configured === "string" && configured.replace(/^\s+|\s+$/g, "")) {
+            return (new Folder(configured)).fsName.replace(/\\/g, "/").replace(/\/$/, "");
+        }
+        script = new File($.fileName);
+        if (String(script.parent.name).toLowerCase() !== "jsx") {
+            throw new Error("Open Codex Bridge through its installed loader or the workspace jsx folder.");
+        }
+        return script.parent.parent.fsName.replace(/\\/g, "/").replace(/\/$/, "");
+    }
+    var WORKSPACE_ROOT = workspaceRoot();
     var existingBridge = $.global[GLOBAL_NAME];
+    var preserveReplacementStop = false;
+    if (!existingBridge && thisObject instanceof Panel) {
+        try {
+            var anchoredBridge = thisObject.__codexAeBridgeOwnerV1;
+            if (anchoredBridge) {
+                if (anchoredBridge.window !== thisObject || !anchoredBridge.ui ||
+                        normalizePath(anchoredBridge.workspaceRoot) !== normalizePath(WORKSPACE_ROOT)) {
+                    refuseAnchoredPanel(anchoredBridge, "Panel này thuộc một cầu nối khác. Đóng panel cũ trước khi mở bản cài đặt này.");
+                    return;
+                }
+                if (anchoredBridge.version !== BRIDGE_VERSION && (anchoredBridge.busy || anchoredBridge.pendingReport ||
+                        anchoredBridge.pendingCleanupFile || anchoredBridge.scheduledCallbackActive || anchoredBridge.connectionActionActive)) {
+                    refuseAnchoredPanel(anchoredBridge, "Chưa thể thay cầu nối cũ: còn thao tác hoặc kết quả chưa xác nhận. Không chạy lại lệnh.");
+                    return;
+                }
+                existingBridge = anchoredBridge;
+                if (anchoredBridge.version === BRIDGE_VERSION) { $.global[GLOBAL_NAME] = anchoredBridge; }
+                else { preserveReplacementStop = anchoredBridge.manualStop === true ||
+                    (!anchoredBridge.running && anchoredBridge.lastStatus === "Bridge stopped"); }
+            }
+        } catch (missingHostAnchorError) {
+            try { $.writeln("Codex AE cannot read the existing panel owner; close and reopen the panel."); } catch (anchorLogError) {}
+            return;
+        }
+    }
     var autoStartOnly = !!$.global.__CODEX_AE_AUTOSTART_ONLY__;
-    if (autoStartOnly && existingBridge && existingBridge.version === BRIDGE_VERSION) {
+    var sameWorkspace = existingBridge && normalizePath(existingBridge.workspaceRoot) === normalizePath(WORKSPACE_ROOT);
+    if (autoStartOnly && existingBridge && existingBridge.version === BRIDGE_VERSION && sameWorkspace) {
         // A Startup loader must not duplicate a listener or override manual Stop.
         return;
+    }
+    if (!autoStartOnly && existingBridge && existingBridge.version === BRIDGE_VERSION && sameWorkspace &&
+            existingBridge.window && existingBridge.ui) {
+        try {
+            // Reusing a live view preserves Stop and never duplicates controls.
+            if ((existingBridge.window === thisObject ||
+                    (!(thisObject instanceof Panel) && existingBridge.window instanceof Window)) &&
+                    typeof existingBridge.window.visible === "boolean" && typeof existingBridge.statusText.text === "string") {
+                if (rewireUiActions(existingBridge)) {
+                    existingBridge.showWindow();
+                    if (existingBridge.window && existingBridge.ui) { return; }
+                }
+            }
+        } catch (staleWindowError) { /* Disposed native controls are replaced below. */ }
     }
 
     function trim(value) {
@@ -1775,12 +1893,21 @@
         this.ready = false;
         this.busy = false;
         this.taskId = 0;
+        this.taskToken = 0;
+        this.taskDueAt = 0;
+        this.scheduledCallbackActive = false;
+        this.connectionActionActive = false;
+        this.connectionRecoveryPending = false;
+        this.manualStop = false;
         this.startupStep = 0;
         this.generation = 0;
         this.lastHeartbeat = 0;
-        this.lastStatus = "Starting bridge...";
+        this.lastActivityAt = 0;
+        this.lastHeartbeatCheckAt = 0;
+        this.heartbeatPublicationVerified = false;
+        this.lastStatus = "Đang khởi động cầu nối…";
         this.progressValue = 0;
-        this.progressLabel = "Loading";
+        this.progressLabel = "Đang tải";
         this.hideProgressPending = false;
         this.pendingReport = null;
         this.pendingCleanupFile = null;
@@ -1790,39 +1917,166 @@
         this.statusText = null;
         this.connectionText = null;
         this.connectionConnected = false;
-        this.modelText = null;
-        this.modelDisplayValue = "";
-        this.lastModelRefresh = 0;
         this.progressGroup = null;
         this.progressText = null;
         this.progressBar = null;
         this.library = null;
         this.libraryText = null;
+        this.libraryControls = null;
         this.libraryDisplayValue = "";
         this.bundle = $.global.__codexAeBundleV1;
         this.functions = $.global.__codexAeFunctionsV1;
         this.scriptsText = null;
         this.logs = [];
+        this.logRevision = 0;
+        this.logViewRevision = -1;
         this.logEntries = this.logs;
         this.logView = null;
         this.logNotices = {};
         this.logWriteError = "";
+        this.ui = null;
+        this.hadUi = false;
+        this.ownedUiRoots = [];
+        this.connectionPens = null;
+        this.connectionUiColor = null;
+    }
+
+    function setControl(control, key, value) {
+        if (control && control[key] !== value) { control[key] = value; }
+    }
+    function refuseAnchoredPanel(owner, message) {
+        try {
+            owner.lastStatus = String(message); owner.connectionConnected = false;
+            if (owner.statusText) { setControl(owner.statusText, "text", message); }
+            if (owner.connectionText) { setControl(owner.connectionText, "text", "Chưa kết nối · " + message); }
+        } catch (anchorStatusError) {}
+    }
+    function rewireUiActions(owner) {
+        var ui = owner && owner.ui, palette = owner && owner.window, records = ui && ui.actions, i;
+        if (!ui || !palette || !records || !records.length || records.length > 16) { return false; }
+        function bind(record) {
+            record.handler = function actionHandler() {
+                var action = record.action, selectedValue;
+                if (record.handler !== actionHandler || owner.ui !== ui || owner.window !== palette) { return; }
+                if (action === "effects" || action === "sfx") { selectedValue = !!record.control.value; }
+                if (action === "start") { owner.start("Reconnect button"); return; }
+                if (!owner.ensureListenerOwner("button " + action, true)) { return; }
+                if (action === "stop") { owner.stop(); return; }
+                owner.refreshConnectionHealth(); owner.recoverScheduled("button " + action);
+                if (action === "effects" || action === "sfx") { owner.setLibraryEnabled(action, selectedValue); }
+                else if (action === "folders") { owner.showSfxFolders(); }
+                else if (action === "refresh") { owner.requestLibraryRefresh(); }
+                else if (action === "functions") { owner.showFunctions(); }
+                else if (action === "scripts") { owner.showScripts(); }
+                else if (action === "clearLog") { owner.clearLog(); }
+                else if (action === "toggleLog") { ui.logExpanded = !ui.logExpanded; owner.reflowUi(true); }
+            };
+            record.control.onClick = record.handler;
+        }
+        try {
+            for (i = 0; i < records.length; i += 1) { bind(records[i]); }
+            ui.activityHandler = function activityHandler() {
+                if (ui.activityHandler === activityHandler && owner.ui === ui && owner.window === palette) { owner.reflowUi(true); }
+            };
+            palette.onActivate = palette.onResizing = palette.onResize = ui.activityHandler;
+            if (ui.layoutManager) { ui.layoutManager.layout = ui.activityHandler; ui.layoutManager.resize = ui.activityHandler; }
+            if (palette instanceof Window) {
+                ui.closeHandler = function closeHandler() {
+                    if (ui.closeHandler !== closeHandler || owner.ui !== ui || owner.window !== palette) { return true; }
+                    if (!owner.ensureListenerOwner("panel close", false)) { releaseBridgeUi(owner); return true; }
+                    owner.stop(); releaseBridgeUi(owner); $.global[GLOBAL_NAME] = null; return true;
+                };
+                palette.onClose = ui.closeHandler;
+            }
+            return true;
+        } catch (disposedBindingError) { releaseBridgeUi(owner); return false; }
+    }
+    function releaseBridgeUi(owner) {
+        var legacy = owner && owner.chat, previousUi = legacy && legacy.ui,
+            window = owner && owner.window, roots = owner && owner.ownedUiRoots || [],
+            stack = [], node, children, record, i, j, visited = 0,
+            events = ["onDraw", "onClick", "onChange", "onChanging", "onActivate", "onDoubleClick"];
+        if (!owner) { return; }
+        if (owner.ui && owner.ui.actions) {
+            for (i = 0; i < owner.ui.actions.length; i += 1) {
+                record = owner.ui.actions[i];
+                try { if (record.control && record.control.onClick === record.handler) { record.control.onClick = null; } } catch (disposedActionError) {}
+                record.handler = null; record.control = null;
+            }
+            owner.ui.actions = []; owner.ui.activityHandler = owner.ui.closeHandler = null;
+        }
+        try {
+            if (window && owner.ui && owner.ui.layoutManager && window.layout === owner.ui.layoutManager) {
+                window.layout = owner.ui.nativeLayout;
+            }
+        } catch (disposedLayoutError) {}
+        // Compatibility cleanup only. A new controller has no embedded chat.
+        // The old controller's Stop runs before its idle resources are released.
+        if (legacy) {
+            for (i = 0; previousUi && previousUi.nativeListeners && i < previousUi.nativeListeners.length; i += 1) {
+                record = previousUi.nativeListeners[i];
+                try { record.control.removeEventListener(record.type, record.handler); } catch (listenerReleaseError) {}
+            }
+            legacy.ui = null; legacy.state = null; legacy.pending = null;
+            legacy.chatPaint = null; legacy.chatTextWidths = null;
+            legacy.previewWanted = null; legacy.previewCache = {}; legacy.previewOrder = [];
+            legacy.transcriptMessages = []; legacy.transcriptMedia = [];
+            legacy.transcriptRows = []; legacy.transcriptCommands = [];
+            owner.chat = null;
+        }
+        for (i = 0; i < roots.length; i += 1) { stack.push(roots[i]); }
+        while (stack.length && visited < 512) {
+            node = stack.pop(); visited += 1;
+            try {
+                children = node.children || [];
+                for (i = 0; i < children.length; i += 1) { stack.push(children[i]); }
+                for (j = 0; j < events.length; j += 1) { if (typeof node[events[j]] === "function") { node[events[j]] = null; } }
+            } catch (disposedControlError) {}
+        }
+        try {
+            if (window) {
+                try { if (window.__codexAeBridgeOwnerV1 === owner) { delete window.__codexAeBridgeOwnerV1; } } catch (anchorReleaseError) {}
+                window.onClose = window.onResize = window.onResizing = window.onActivate = null;
+                if (window instanceof Window) { window.close(); }
+                else {
+                    // AE owns the dock. Remove only this plugin's recorded roots.
+                    for (i = 0; i < roots.length; i += 1) {
+                        try { window.remove(roots[i]); } catch (disposedRootError) {}
+                    }
+                }
+            }
+        } catch (disposedWindowError) {}
+        owner.ui = null; owner.ownedUiRoots = []; owner.connectionPens = null; owner.connectionUiColor = null;
+        owner.window = owner.statusText = owner.connectionText = null;
+        owner.progressGroup = owner.progressText = owner.progressBar = null;
+        owner.libraryText = owner.scriptsText = owner.logView = owner.logSummary = null;
+        owner.libraryControls = null;
     }
 
     Bridge.prototype.refreshLog = function () {
-        var lines = [], i, entry;
+        var lines, i, entry;
         try {
             if (!this.logView) { return; }
+            if (this.logSummary) {
+                entry = this.logs.length ? this.logs[this.logs.length - 1] : null;
+                setControl(this.logSummary, "text", entry ? (entry.level === "error" ? "Lỗi: " : "") + entry.message.substring(0, 180) : "Sẵn sàng");
+                setControl(this.logSummary, "helpTip", entry ? entry.message : "Mở Nhật ký để xem tiến trình và lỗi.");
+            }
+            // Keep entries and the persistent log while collapsed, without
+            // rebuilding an invisible 200-line native text buffer on each event.
+            if (!this.ui || !this.ui.logVisible || this.logViewRevision === this.logRevision) { return; }
+            lines = [];
             for (i = 0; i < this.logs.length; i += 1) {
                 entry = this.logs[i];
                 lines.push(entry.time + " [" + entry.level.toUpperCase() + "] " +
                     (entry.runId ? entry.runId + " | " : "") +
                     (typeof entry.percent === "number" ? entry.percent + "% | " : "") + entry.message);
             }
-            this.logView.text = lines.join("\n");
-            this.logView.helpTip = this.logWriteError || "Latest 200 events. Disk log: .ae-codex/bridge/logs/events.log";
+            setControl(this.logView, "text", lines.join("\n"));
+            setControl(this.logView, "helpTip", this.logWriteError || "200 sự kiện gần nhất. Nhật ký: .ae-codex/bridge/logs/events.log");
+            this.logViewRevision = this.logRevision;
             if (this.window && this.window.update) { this.window.update(); }
-        } catch (logUiError) { this.logView = null; }
+        } catch (logUiError) { releaseBridgeUi(this); }
     };
 
     Bridge.prototype.persistLog = function (entry) {
@@ -1867,12 +2121,13 @@
             if (typeof percent === "number" && isFinite(percent)) { entry.percent = Math.max(0, Math.min(100, Math.round(percent))); }
             this.logs.push(entry);
             if (this.logs.length > 200) { this.logs.splice(0, this.logs.length - 200); }
+            this.logRevision += 1;
             this.persistLog(entry);
             this.refreshLog();
         } catch (logError) {}
     };
     Bridge.prototype.appendLog = Bridge.prototype.log;
-    Bridge.prototype.clearLog = function () { this.logs.splice(0, this.logs.length); this.refreshLog(); };
+    Bridge.prototype.clearLog = function () { this.logs.splice(0, this.logs.length); this.logRevision += 1; this.refreshLog(); };
     Bridge.prototype.logOnce = function (key, level, message, runId) {
         if (this.logNotices[key] !== message) {
             this.logNotices[key] = message;
@@ -1880,25 +2135,49 @@
         }
     };
 
+    Bridge.prototype.getPublicFunctionCount = function () {
+        var runtime = this.functions, cache = this.publicFunctionCountCache, count;
+        if (!cache || cache.runtime !== runtime) {
+            // A registry is immutable for its runtime. Do not allocate all descriptors
+            // again on every idle tick, including when an unavailable registry fails.
+            cache = { runtime: runtime, count: null, error: "" };
+            this.publicFunctionCountCache = cache;
+            try {
+                count = runtime.list(false).length;
+                if (typeof count !== "number" || !isFinite(count) || count < 0 || count !== Math.floor(count)) {
+                    throw new Error("Danh mục công cụ không hợp lệ");
+                }
+                cache.count = count;
+            } catch (functionCountError) {
+                cache.error = String(functionCountError).slice(0, 500);
+            }
+        }
+        return cache.count;
+    };
+
     Bridge.prototype.refreshScriptsDisplay = function () {
+        var count, countError;
         try {
             if (this.scriptsText) {
-                this.scriptsText.text = "Tools: " + this.functions.list(false).length + " reusable functions\n" + this.bundle.describe();
-                this.scriptsText.helpTip = this.bundle.errors.length ? this.bundle.errors.join("\n") :
-                    "Full validation is recorded once at installation/update. Each requested branch is checksum-checked on demand; no background script scan.";
+                count = this.getPublicFunctionCount();
+                countError = this.publicFunctionCountCache.error;
+                setControl(this.scriptsText, "text", (count === null ? "Công cụ: chưa đọc được danh mục" :
+                    "Công cụ: " + count + " chức năng dùng lại") + "\n" + this.bundle.describe());
+                setControl(this.scriptsText, "helpTip", countError || (this.bundle.errors.length ? this.bundle.errors.join("\n") :
+                    "Bộ công cụ được kiểm tra khi cài đặt hoặc cập nhật. Mỗi nhánh được kiểm tra checksum khi cần; không quét toàn bộ script trong nền."));
             }
-        } catch (disposedScriptsUiError) { this.scriptsText = null; }
+        } catch (disposedScriptsUiError) { releaseBridgeUi(this); }
     };
 
     Bridge.prototype.showScripts = function () {
-        var dialog = new Window("dialog", "Legacy archive - " + this.bundle.names.length + " historical scripts");
+        var dialog = new Window("dialog", "Kho script cũ · " + this.bundle.names.length + " nhánh lưu trữ");
         var bundle = this.bundle;
         var search = dialog.add("edittext", undefined, "");
         var list = dialog.add("listbox", undefined, []);
         var detail = dialog.add("statictext", undefined, "", { multiline: true });
-        var close = dialog.add("button", undefined, "Close", { name: "ok" });
+        var close = dialog.add("button", undefined, "Đóng", { name: "ok" });
         dialog.orientation = "column"; dialog.alignChildren = ["fill", "top"];
-        search.helpTip = "Filter branch names";
+        search.helpTip = "Tìm tên nhánh trong kho script cũ";
         list.preferredSize = [560, 320]; detail.preferredSize = [560, 64];
         function fill() {
             var i, name, entry, item, query = String(search.text).toLowerCase();
@@ -1919,19 +2198,20 @@
                     "\nDependencies: " + (entry.dependencies.join(", ") || "none");
             } catch (recipeError) { detail.text = String(recipeError); }
         };
+        cartoonDialog(dialog, search, list, detail, close);
         fill(); dialog.center(); dialog.show();
     };
 
     Bridge.prototype.showFunctions = function () {
-        var dialog = new Window("dialog", "Installed reusable tools - " + this.functions.list(false).length);
+        var dialog = new Window("dialog", "Công cụ đã cài · " + this.functions.list(false).length);
         var search = dialog.add("edittext", undefined, "");
         var list = dialog.add("listbox", undefined, []);
-        var detail = dialog.add("edittext", undefined, "", { multiline: true, readonly: true, scrolling: true });
+        var detail = cartoonText(dialog, "", true);
         var descriptors = this.functions.list(false);
         dialog.orientation = "column"; dialog.alignChildren = ["fill", "top"];
-        search.helpTip = "Search reusable tools with parameters. Historical project scripts are kept separately in Archive.";
+        search.helpTip = "Tìm công cụ dùng lại và tham số. Các script dự án cũ được giữ trong Kho script.";
         list.preferredSize = [560, 280]; detail.preferredSize = [560, 180];
-        dialog.add("button", undefined, "Close", { name: "ok" });
+        var close = dialog.add("button", undefined, "Đóng", { name: "ok" });
         function fill() {
             var i, entry, item, query = String(search.text).toLowerCase(), label;
             list.removeAll();
@@ -1948,6 +2228,7 @@
                 "function": entry.name, args: entry.args || {}, legacy: !!entry.legacy
             }) : "";
         };
+        cartoonDialog(dialog, search, list, detail, close);
         fill(); dialog.center(); dialog.show();
     };
 
@@ -1961,7 +2242,7 @@
             this.library.begin(this.generation);
         } catch (libraryError) {
             this.library = null;
-            this.libraryDisplayValue = "Library unavailable: " + String(libraryError);
+            this.libraryDisplayValue = "Library unavailable: " + this.describeError(libraryError);
             if (this.libraryText) { this.libraryText.text = this.libraryDisplayValue; }
             this.log("error", this.libraryDisplayValue);
         }
@@ -1974,41 +2255,162 @@
         try {
             if (this.libraryText && this.libraryText.text !== display) {
                 this.libraryText.text = display;
-                if (this.window) { this.window.layout.layout(true); }
+                if (this.window) { this.reflowUi(); }
             }
-        } catch (libraryUiError) { this.libraryText = null; }
+        } catch (libraryUiError) { releaseBridgeUi(this); }
+        this.refreshLibraryControls();
     };
 
-    Bridge.prototype.refreshModelDisplay = function () {
-        var file = new File(this.workspaceRoot + "/.ae-codex/model-display.txt");
-        var contents = "";
-        var match;
-        var text = "Codex model: unknown (run model sync)";
-        this.lastModelRefresh = new Date().getTime();
-        if (file.exists && file.length < 2048) {
-            file.encoding = "UTF-8";
-            if (file.open("r")) {
-                try {
-                    contents = file.read();
-                } finally {
-                    file.close();
-                }
-                match = contents.match(/(?:^|\n)model=([A-Za-z0-9._-]{1,100})(?:\r?\n|$)/);
-                if (contents.indexOf("schema=codex-model-display/v1") === 0 && match) {
-                    text = "Codex model: " + match[1] + " (default)";
-                }
-            }
-        }
+    Bridge.prototype.refreshLibraryControls = function () {
+        var controls = this.libraryControls, library = this.library, preferences = null,
+            available = !!(library && typeof library.getPreferences === "function" &&
+                typeof library.setEnabled === "function" && typeof library.requestRefresh === "function"),
+            scanning = available && (library.refreshPending === true || (library.state && library.state.state === "scanning")),
+            idle = this.running && this.ready && !this.busy && !this.pendingReport && !this.pendingCleanupFile,
+            tooltip = "Chỉ lập chỉ mục thư viện theo yêu cầu; không bật/tắt effects, layer hay âm thanh trong project.";
+        if (!controls) { return; }
         try {
-            if (this.modelText && this.modelDisplayValue !== text) {
-                this.modelText.text = text;
-                this.modelDisplayValue = text;
-                if (this.window) {
-                    this.window.layout.layout(true);
-                }
+            if (available) {
+                preferences = library.getPreferences();
+                available = !!(preferences && typeof preferences.effectsEnabled === "boolean" &&
+                    typeof preferences.sfxEnabled === "boolean" && preferences.manualRefresh === true);
             }
-        } catch (disposedModelUiError) {
-            this.modelText = null;
+            if (available) {
+                setControl(controls.effects, "value", preferences.effectsEnabled);
+                setControl(controls.sfx, "value", preferences.sfxEnabled);
+            }
+            setControl(controls.effects, "enabled", !!(available && idle && !scanning));
+            setControl(controls.sfx, "enabled", !!(available && idle && !scanning));
+            setControl(controls.folders, "enabled", !!(available && idle && !scanning &&
+                typeof library.getSfxRoots === "function" && typeof library.setSfxRoots === "function"));
+            setControl(controls.refresh, "enabled", !!(available && idle && !scanning &&
+                (preferences.effectsEnabled || preferences.sfxEnabled)));
+            setControl(controls.refresh, "helpTip", !available ? "Chưa tải được bộ kiểm kê thủ công. Hãy kết nối lại hoặc cập nhật Codex AE." :
+                (scanning ? "Đã có yêu cầu cập nhật thư viện. Chờ hoàn tất rồi cập nhật tiếp." : tooltip));
+        } catch (libraryControlsError) {
+            try { controls.effects.enabled = controls.sfx.enabled = controls.folders.enabled = controls.refresh.enabled = false; }
+            catch (disposedLibraryControlsError) { releaseBridgeUi(this); }
+        }
+    };
+
+    Bridge.prototype.setLibraryEnabled = function (kind, enabled) {
+        try {
+            if ((kind !== "effects" && kind !== "sfx") || typeof enabled !== "boolean") { throw new Error("Lựa chọn thư viện không hợp lệ."); }
+            if (!this.running || !this.ready || this.busy || this.pendingReport || this.pendingCleanupFile ||
+                    !this.library || typeof this.library.setEnabled !== "function") {
+                throw new Error("Cầu nối chưa sẵn sàng để lưu lựa chọn thư viện.");
+            }
+            this.library.setEnabled(kind, enabled);
+            this.log("info", (enabled ? "Đã bật" : "Đã tắt") + " kiểm kê " + (kind === "effects" ? "Effects" : "SFX") + ". Bấm Cập nhật thư viện để quét.");
+            this.refreshLibraryDisplay();
+            return true;
+        } catch (preferenceError) {
+            this.log("error", "Không lưu được lựa chọn thư viện: " + this.describeError(preferenceError));
+            this.refreshLibraryControls();
+            return false;
+        }
+    };
+
+    Bridge.prototype.requestLibraryRefresh = function () {
+        var accepted = false;
+        try {
+            if (!this.running || !this.ready || this.busy || this.pendingReport || this.pendingCleanupFile ||
+                    !this.library || typeof this.library.requestRefresh !== "function") {
+                throw new Error("Cầu nối chưa sẵn sàng. Chờ tác vụ hiện tại hoàn tất hoặc kết nối lại.");
+            }
+            accepted = this.library.requestRefresh() === true;
+            this.log(accepted ? "info" : "warning", accepted ? "Đã nhận yêu cầu cập nhật thư viện; sẽ quét khi AE rảnh." : "Chưa nhận yêu cầu: thư viện đang cập nhật hoặc chưa bật mục kiểm kê.");
+        } catch (refreshError) {
+            this.log("error", "Không cập nhật được thư viện: " + this.describeError(refreshError));
+        }
+        this.refreshLibraryDisplay();
+        return accepted;
+    };
+
+    Bridge.prototype.showSfxFolders = function () {
+        var owner = this, library = this.library, roots, initial, i, dialog, instructions, list, actions,
+            add, remove, status, footer, save, cancel, changed = false;
+        try {
+            if (!this.running || !this.ready || this.busy || this.pendingReport || this.pendingCleanupFile || !library ||
+                    library.refreshPending || (library.state && library.state.state === "scanning") ||
+                    typeof library.getSfxRoots !== "function" || typeof library.setSfxRoots !== "function") {
+                throw new Error("Cầu nối chưa sẵn sàng để sửa thư mục SFX. Chờ cập nhật hoặc tác vụ hiện tại hoàn tất.");
+            }
+            initial = library.getSfxRoots(); roots = [];
+            if (Object.prototype.toString.call(initial) !== "[object Array]" || initial.length > 32) { throw new Error("Danh sách thư mục SFX không hợp lệ."); }
+            for (i = 0; i < initial.length; i += 1) {
+                if (typeof initial[i] !== "string") { throw new Error("Đường dẫn thư mục SFX không hợp lệ."); }
+                roots.push(initial[i]);
+            }
+            dialog = new Window("dialog", "Thư mục thư viện SFX");
+            dialog.orientation = "column"; dialog.alignChildren = ["fill", "top"];
+            instructions = dialog.add("statictext", undefined, "Để bỏ thư mục sai: chọn dòng → Bỏ khỏi danh sách → Lưu. Không xóa dữ liệu trên đĩa.\nChỉ thêm thư mục cụ thể, không chọn cả ổ đĩa. Lưu không quét; bấm Cập nhật khi cần.", { multiline: true });
+            instructions.preferredSize = [560, 46];
+            list = dialog.add("listbox", undefined, [], { multiselect: false }); list.preferredSize = [560, 180];
+            actions = dialog.add("group"); add = actions.add("button", undefined, "Thêm thư mục…");
+            remove = actions.add("button", undefined, "Bỏ khỏi danh sách");
+            remove.helpTip = "Chỉ bỏ đường dẫn khỏi cấu hình; không xóa thư mục hoặc âm thanh trên đĩa.";
+            status = dialog.add("statictext", undefined, "", { multiline: true }); status.preferredSize = [560, 38];
+            footer = dialog.add("group"); save = footer.add("button", undefined, "Lưu", { name: "ok" });
+            cancel = footer.add("button", undefined, "Hủy", { name: "cancel" });
+            function selectedIndex() {
+                var selected = list.selection, index = selected ? selected.index : -1;
+                if (typeof index !== "number" || Math.floor(index) !== index || index < 0 || index >= roots.length ||
+                        list.items[index] !== selected) { return -1; }
+                return index;
+            }
+            function refreshSelection() {
+                remove.enabled = selectedIndex() >= 0;
+            }
+            function fill(selectionIndex, message) {
+                var index;
+                list.removeAll();
+                for (index = 0; index < roots.length; index += 1) { list.add("item", roots[index]); }
+                if (roots.length > 0) { list.selection = Math.max(0, Math.min(selectionIndex, roots.length - 1)); }
+                save.enabled = true; add.enabled = roots.length < 32; refreshSelection();
+                status.text = roots.length + "/32 thư mục. " + (message || "Chọn dòng cần bỏ khỏi danh sách.") +
+                    (roots.length === 0 ? " Bấm Lưu để xóa danh sách và tắt kiểm kê SFX." : (changed ? " Bấm Lưu để áp dụng." : ""));
+            }
+            list.onChange = refreshSelection;
+            add.onClick = function () {
+                var selected = Folder.selectDialog("Chọn thư mục chứa SFX cụ thể"), value, index;
+                if (!selected) { return; }
+                value = selected.fsName;
+                for (index = 0; index < roots.length; index += 1) {
+                    if (normalizePath(roots[index]) === normalizePath(value)) { status.text = "Thư mục này đã có trong danh sách."; return; }
+                }
+                if (roots.length >= 32) { status.text = "Chỉ lưu tối đa 32 thư mục SFX."; return; }
+                roots.push(value); changed = true; fill(roots.length - 1, "Đã thêm thư mục vào danh sách.");
+            };
+            remove.onClick = function () {
+                var index = selectedIndex();
+                if (index < 0) { refreshSelection(); status.text = "Chọn một dòng thư mục cần bỏ, rồi bấm Bỏ khỏi danh sách. Chưa có thay đổi nào được lưu."; return; }
+                roots.splice(index, 1); changed = true; fill(index, "Đã bỏ thư mục đã chọn. Không xóa dữ liệu trên đĩa.");
+            };
+            save.onClick = function () {
+                try {
+                    if (!owner.running || !owner.ready || owner.busy || owner.pendingReport || owner.pendingCleanupFile || owner.library !== library) {
+                        throw new Error("Cầu nối đã đổi trạng thái. Hủy hộp thoại và chờ tác vụ hoàn tất.");
+                    }
+                    library.setSfxRoots(roots.slice(0));
+                    owner.log("info", roots.length === 0 ? "Đã lưu danh sách thư mục trống và tắt kiểm kê SFX. Không xóa dữ liệu trên đĩa." :
+                        "Đã lưu " + roots.length + " thư mục SFX. Chưa quét và không tự bật SFX; bấm Cập nhật khi cần.");
+                    owner.refreshLibraryDisplay(); dialog.close(1);
+                } catch (saveError) {
+                    status.text = "Không lưu được: " + owner.describeError(saveError);
+                    owner.log("error", "Không lưu được thư mục SFX: " + owner.describeError(saveError));
+                }
+            };
+            cancel.onClick = function () { dialog.close(0); };
+            cartoonSurface(dialog, cartoonPaper); cartoonSurface(instructions, cartoonPaper, "Segoe UI", 11);
+            cartoonSurface(list, cartoonField, "Segoe UI", 11); cartoonSurface(status, cartoonPaper, "Segoe UI", 11);
+            cartoonButton(add, [0.19, 0.29, 0.46, 1]); cartoonButton(remove, [0.43, 0.22, 0.23, 1]);
+            cartoonButton(save, [0.16, 0.34, 0.27, 1]); cartoonButton(cancel, [0.29, 0.24, 0.44, 1]);
+            remove.preferredSize = [160, 32]; fill(0); dialog.center(); dialog.show();
+            return true;
+        } catch (folderError) {
+            this.log("error", "Không mở được thư mục SFX: " + this.describeError(folderError));
+            return false;
         }
     };
 
@@ -2124,34 +2526,45 @@
         this.connectionConnected = connected;
         try {
             if (this.connectionText) {
-                this.connectionText.text = (connected ? "\uD83D\uDC4D LIKE - " : "\uD83D\uDC4E DISLIKE - ") + detail;
-                this.connectionText.graphics.foregroundColor = this.connectionText.graphics.newPen(
-                    this.connectionText.graphics.PenType.SOLID_COLOR,
-                    connected ? [0.25, 0.85, 0.40, 1] : [1, 0.40, 0.35, 1], 1
-                );
+                setControl(this.connectionText, "text", (connected ? "Đã kết nối · " : "Chưa kết nối · ") + detail);
+                if (this.connectionPens && this.connectionUiColor !== connected) {
+                    this.connectionText.graphics.foregroundColor = connected ? this.connectionPens.connected : this.connectionPens.disconnected;
+                    this.connectionUiColor = connected;
+                }
             }
         } catch (disposedConnectionUiError) {
-            this.connectionText = null;
+            releaseBridgeUi(this);
         }
+        this.refreshLibraryControls();
     };
 
     Bridge.prototype.setUiStatus = function (text) {
         this.lastStatus = String(text);
         try {
             if (this.statusText) {
-                this.statusText.text = this.lastStatus;
+                setControl(this.statusText, "text", this.lastStatus);
                 if (this.window) {
-                    this.window.layout.layout(true);
+                    this.reflowUi();
                 }
             }
         } catch (disposedUiError) {
-            // Closing a docked ScriptUI panel can dispose its controls while
-            // the named engine and polling task continue to live.
-            this.window = null;
-            this.statusText = null;
-            this.progressGroup = null;
-            this.progressText = null;
-            this.progressBar = null;
+            releaseBridgeUi(this);
+        }
+    };
+
+    Bridge.prototype.reflowUi = function (force) {
+        this.refreshConnectionHealth();
+        this.recoverScheduled("panel layout");
+        if (!this.window) { return; }
+        try {
+            if (this.ui && this.ui.reflow) { this.ui.reflow(!!force); }
+            else { this.window.layout.layout(true); }
+        } catch (disposedLayoutError) {
+            // Home/project/workspace changes may dispose the native panel while
+            // the session remains alive. UI failure must never block jobs or
+            // restart/replay the controller's in-flight work.
+            releaseBridgeUi(this);
+            this.logOnce("ui-disposed", "info", "Panel AE đã được thay đổi; cầu nối tiếp tục nhận lệnh. Mở lại Codex Bridge để hiện bảng.");
         }
     };
 
@@ -2169,20 +2582,13 @@
                 this.progressText.text = this.progressLabel + " - " + normalizedValue + "%";
             }
             if (this.window) {
-                this.window.layout.layout(true);
-                if (this.window.layout.resize) {
-                    this.window.layout.resize();
-                }
+                this.reflowUi();
                 if (this.window.update) {
                     this.window.update();
                 }
             }
         } catch (disposedUiError) {
-            this.window = null;
-            this.statusText = null;
-            this.progressGroup = null;
-            this.progressText = null;
-            this.progressBar = null;
+            releaseBridgeUi(this);
         }
     };
 
@@ -2198,20 +2604,13 @@
                 this.progressBar.visible = true;
             }
             if (this.window) {
-                this.window.layout.layout(true);
-                if (this.window.layout.resize) {
-                    this.window.layout.resize();
-                }
+                this.reflowUi();
                 if (this.window.update) {
                     this.window.update();
                 }
             }
         } catch (disposedUiError) {
-            this.window = null;
-            this.statusText = null;
-            this.progressGroup = null;
-            this.progressText = null;
-            this.progressBar = null;
+            releaseBridgeUi(this);
         }
     };
 
@@ -2227,20 +2626,13 @@
                 this.progressBar.visible = false;
             }
             if (this.window) {
-                this.window.layout.layout(true);
-                if (this.window.layout.resize) {
-                    this.window.layout.resize();
-                }
+                this.reflowUi();
                 if (this.window.update) {
                     this.window.update();
                 }
             }
         } catch (disposedUiError) {
-            this.window = null;
-            this.statusText = null;
-            this.progressGroup = null;
-            this.progressText = null;
-            this.progressBar = null;
+            releaseBridgeUi(this);
         }
     };
 
@@ -2250,6 +2642,7 @@
             "\"schema\":\"codex-ae-heartbeat/v1\"," +
             "\"state\":\"" + jsonEscape(state) + "\"," +
             "\"bridgeVersion\":\"" + jsonEscape(BRIDGE_VERSION) + "\"," +
+            "\"workspaceRoot\":\"" + jsonEscape(this.workspaceRoot) + "\"," +
             "\"startupPercent\":" + this.progressValue + "," +
             "\"startupStage\":\"" + jsonEscape(this.progressLabel) + "\"," +
             "\"sessionNonce\":\"" + jsonEscape(this.sessionNonce) + "\"," +
@@ -2265,6 +2658,15 @@
 
         this.writeAtomic(this.heartbeatPath, payload);
         this.lastHeartbeat = now;
+        this.lastHeartbeatCheckAt = now;
+        this.heartbeatPublicationVerified = true;
+        if (state === "running") {
+            this.connectionRecoveryPending = false;
+            if (this.running && this.ready && (this.lastStatus === "Đang khôi phục kết nối; chờ heartbeat mới…" ||
+                    this.lastStatus === "Mất nhịp kết nối; đang kiểm tra listener AE…")) {
+                this.setUiStatus("Bridge " + BRIDGE_VERSION + " connected successfully\nReady for Codex jobs");
+            }
+        }
         this.setConnectionStatus(state === "running" && this.running && this.ready,
             state === "running" ? "Connected / Ready for Codex" :
                 (state === "starting" ? "Connecting..." :
@@ -2654,10 +3056,71 @@
         this.publishPendingReport();
     };
 
+    Bridge.prototype.markConnectionUnavailable = function (message, preserveStatus) {
+        this.setConnectionStatus(false, message);
+        if (preserveStatus) { return; }
+        this.lastStatus = String(message);
+        try { if (this.statusText) { setControl(this.statusText, "text", this.lastStatus); } }
+        catch (disposedStatusError) { releaseBridgeUi(this); }
+    };
+
+    Bridge.prototype.verifyHeartbeatPublication = function () {
+        var heartbeat = new File(this.heartbeatPath), text, expectedSession, expectedTimestamp, expectedWorkspace;
+        if (!heartbeat.exists || !heartbeat.open("r")) { return false; }
+        try { text = heartbeat.read(); }
+        finally { heartbeat.close(); }
+        expectedSession = "\"sessionNonce\":\"" + jsonEscape(this.sessionNonce) + "\"";
+        expectedTimestamp = "\"timestampEpochMs\":" + String(this.lastHeartbeat);
+        expectedWorkspace = "\"workspaceRoot\":\"" + jsonEscape(this.workspaceRoot) + "\"";
+        return text.indexOf("\"schema\":\"codex-ae-heartbeat/v1\"") >= 0 &&
+            text.indexOf("\"bridgeVersion\":\"" + jsonEscape(BRIDGE_VERSION) + "\"") >= 0 &&
+            text.indexOf(expectedWorkspace) >= 0 &&
+            text.indexOf("\"state\":\"running\"") >= 0 &&
+            text.indexOf(expectedSession) >= 0 && text.indexOf(expectedTimestamp) >= 0;
+    };
+
+    Bridge.prototype.ensureListenerOwner = function (reason, reclaimMissing) {
+        var registered = $.global[GLOBAL_NAME], message;
+        if (registered === this) { return true; }
+        if (!registered && reclaimMissing) {
+            $.global[GLOBAL_NAME] = this;
+            this.log("warning", "Restored missing bridge binding; session=" + this.sessionNonce +
+                "; generation=" + this.generation + "; reason=" + String(reason || "panel").substring(0, 80));
+            return true;
+        }
+        message = "Panel này không còn giữ kết nối. Đóng và mở lại Codex Bridge để dùng phiên hiện tại.";
+        this.markConnectionUnavailable(message);
+        this.logOnce("ownership-conflict", "warning", "Refused stale panel listener; session=" + this.sessionNonce +
+            "; generation=" + this.generation + "; reason=" + String(reason || "panel").substring(0, 80));
+        return false;
+    };
+
+    Bridge.prototype.refreshConnectionHealth = function () {
+        var age, now;
+        if (!this.running || !this.ready || this.connectionActionActive) { return; }
+        now = new Date().getTime();
+        age = now - this.lastHeartbeat;
+        if (this.lastHeartbeat && now - this.lastHeartbeatCheckAt >= 2000) {
+            this.lastHeartbeatCheckAt = now;
+            try { this.heartbeatPublicationVerified = this.verifyHeartbeatPublication(); }
+            catch (heartbeatReadError) { this.heartbeatPublicationVerified = false; }
+        }
+        if ($.global[GLOBAL_NAME] !== this || !this.lastHeartbeat || age < -5000 || age > 10000 ||
+                !this.heartbeatPublicationVerified || this.connectionRecoveryPending) {
+            this.markConnectionUnavailable(this.connectionRecoveryPending ? "Đang khôi phục kết nối; chờ heartbeat mới…" :
+                "Mất nhịp kết nối; đang kiểm tra listener AE…", /^Bridge (error|listener stopped):/.test(this.lastStatus));
+        }
+    };
+
     Bridge.prototype.scheduleNext = function (delay) {
         if (this.running && !this.taskId) {
+            if ($.global[GLOBAL_NAME] !== this) { throw new Error("Bridge listener ownership changed before scheduling"); }
+            this.taskToken += 1;
+            this.taskDueAt = new Date().getTime() + delay;
             this.taskId = app.scheduleTask(
-                "$.global.__codexAeBridgeV1.runScheduled(" + this.generation + ")",
+                "if ($.global.__codexAeBridgeV1 && typeof $.global.__codexAeBridgeV1.runScheduled === \"function\") { " +
+                    "$.global.__codexAeBridgeV1.runScheduled(" + this.generation + "," + this.taskToken + ",\"" +
+                    jsonEscape(this.sessionNonce) + "\"); }",
                 delay,
                 false
             );
@@ -2667,16 +3130,52 @@
         }
     };
 
-    Bridge.prototype.runScheduled = function (generation) {
-        if (!this.running || generation !== this.generation) {
+    Bridge.prototype.runScheduled = function (generation, taskToken, sessionNonce) {
+        if ($.global[GLOBAL_NAME] !== this || !this.running || generation !== this.generation || taskToken !== this.taskToken ||
+                sessionNonce !== this.sessionNonce || this.scheduledCallbackActive) {
             return;
         }
 
         this.taskId = 0;
-        if (!this.ready) {
-            this.advanceStartup(generation);
-        } else {
-            this.tick(generation);
+        this.taskDueAt = 0;
+        this.scheduledCallbackActive = true;
+        try {
+            if (!this.ready) { this.advanceStartup(generation); }
+            else { this.tick(generation); }
+        } finally {
+            this.scheduledCallbackActive = false;
+        }
+    };
+
+    Bridge.prototype.recoverScheduled = function (reason) {
+        var now, staleTask;
+        // AE can discard a one-shot task while restoring Home/workspaces. Native
+        // panel activity may rearm only that listener, never restart a session or
+        // replay a job. Healthy layout events allocate no additional timer.
+        if (!this.running || this.connectionActionActive || this.scheduledCallbackActive ||
+                (this.busy && !this.pendingReport && !this.pendingCleanupFile)) { return false; }
+        now = new Date().getTime();
+        if (this.taskId && (!this.taskDueAt || now - this.taskDueAt < 10000)) { return false; }
+        if (!this.ensureListenerOwner(reason, true)) { return false; }
+        staleTask = this.taskId;
+        this.taskToken += 1;
+        this.taskId = 0;
+        this.taskDueAt = 0;
+        if (staleTask) { try { app.cancelTask(staleTask); } catch (expiredTaskError) {} }
+        try {
+            this.connectionRecoveryPending = true;
+            this.markConnectionUnavailable("Đang khôi phục kết nối; chờ heartbeat mới…");
+            this.scheduleNext(60);
+            this.log("warning", "Khôi phục nhịp kết nối AE; session=" + this.sessionNonce + "; generation=" +
+                this.generation + "; reason=" + String(reason || "panel hoạt động").substring(0, 80) + ". Không chạy lại lệnh cũ.");
+            return true;
+        } catch (recoveryError) {
+            this.running = false; this.ready = false;
+            this.log("error", "Không khôi phục được nhịp kết nối: " + this.describeError(recoveryError));
+            this.setConnectionStatus(false, "Listener stopped");
+            this.setUiStatus("Bridge listener stopped:\n" + String(recoveryError));
+            try { this.writeHeartbeat("error", String(recoveryError)); } catch (heartbeatError) {}
+            return false;
         }
     };
 
@@ -2741,8 +3240,14 @@
                 this.ready = true;
                 this.setProgress(100, "Success");
                 this.writeHeartbeat("running", "Waiting for jobs");
+                var connectedAt = new Date();
+                this.lastActivityAt = connectedAt.getTime();
+                // Time stamp makes every successful (re)connect visible in the panel.
                 this.setUiStatus(
-                    "Bridge " + BRIDGE_VERSION + " connected successfully\n" +
+                    "Bridge " + BRIDGE_VERSION + " connected successfully · " +
+                    (connectedAt.getHours() < 10 ? "0" : "") + connectedAt.getHours() + ":" +
+                    (connectedAt.getMinutes() < 10 ? "0" : "") + connectedAt.getMinutes() + ":" +
+                    (connectedAt.getSeconds() < 10 ? "0" : "") + connectedAt.getSeconds() + "\n" +
                     "Ready for Codex jobs"
                 );
                 this.hideProgressPending = true;
@@ -2779,9 +3284,7 @@
             }
 
             var now = new Date().getTime();
-            if (now - this.lastModelRefresh >= 2000) {
-                this.refreshModelDisplay();
-            }
+            this.reflowUi();
             if (now - this.lastHeartbeat >= 2000) {
                 this.writeHeartbeat(
                     "running",
@@ -2791,7 +3294,7 @@
                 );
             }
 
-            if (!this.busy) {
+            if (!this.busy && !this.pendingReport && !this.pendingCleanupFile) {
                 var inbox = new Folder(this.inboxPath);
                 var jobs = inbox.getFiles(function (candidate) {
                     return candidate instanceof File && /\.job$/i.test(candidate.name);
@@ -2801,9 +3304,10 @@
                     jobs.sort(function (left, right) {
                         return left.name < right.name ? -1 : (left.name > right.name ? 1 : 0);
                     });
+                    this.lastActivityAt = now;
                     this.processJob(jobs[0]);
                 } else {
-                    if (now - this.bundle.lastPoll >= 2000) { this.bundle.refresh(false); }
+                    if (now - this.bundle.lastPoll >= (now - this.lastActivityAt < 20000 ? 2000 : 5000)) { this.bundle.refresh(false); }
                     this.refreshScriptsDisplay();
                     if (this.library) {
                         this.library.tick();
@@ -2823,7 +3327,10 @@
         } finally {
             if (this.running && this.ready && generation === this.generation) {
                 try {
-                    this.scheduleNext(500);
+                    // Idle backoff: scan the inbox every 0.5 s right after activity, every 1 s when idle.
+                    // Heartbeat cadence (2 s) and the 10 s freshness limit are unchanged.
+                    this.scheduleNext(this.busy || this.pendingReport || this.pendingCleanupFile ||
+                        new Date().getTime() - this.lastActivityAt < 20000 ? 500 : 1000);
                 } catch (scheduleError) {
                     this.log("error", "Bridge listener stopped: " + this.describeError(scheduleError));
                     this.ready = false;
@@ -2842,7 +3349,60 @@
         }
     };
 
-    Bridge.prototype.start = function () {
+    // Reconnect picks up a newer installed version without restarting AE: installation.json in
+    // the install root points at the active runtime. If it differs from this bridge's runtime,
+    // load that bundle into the same panel; it stops and replaces this bridge (no job is replayed).
+    Bridge.prototype.loadNewerInstallation = function () {
+        var root = new Folder(this.workspaceRoot), installRoot = root.parent && root.parent.parent, file, text, match,
+            target, bundle, keys = ["__CODEX_AE_WORKSPACE_ROOT__", "__CODEX_AE_PANEL_HOST__", "__CODEX_AE_AUTOSTART_ONLY__"],
+            present = [], previous = [], i;
+        try {
+            if (!installRoot || String(root.parent.name).toLowerCase() !== "versions") { return false; }
+            file = new File(installRoot.fsName + "/installation.json");
+            if (!file.exists) { return false; }
+            file.encoding = "UTF-8";
+            if (!file.open("r")) { return false; }
+            try { text = file.read(); } finally { file.close(); }
+            if (/"state"\s*:\s*"uninstall/.test(text)) { return false; }
+            match = /"runtimeRoot"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
+            if (!match) { return false; }
+            target = match[1].replace(/\\\\/g, "\\").replace(/\\\//g, "/");
+            if (normalizePath(new Folder(target).fsName) === normalizePath(root.fsName)) { return false; }
+            bundle = new File(target + "/jsx/Codex Bridge.jsx");
+            if (!bundle.exists) { return false; }
+        } catch (probeError) {
+            this.log("warning", "Không đọc được bản cài mới: " + this.describeError(probeError));
+            return false;
+        }
+        this.log("info", "Tìm thấy bản cài mới tại " + bundle.parent.parent.fsName + "; đang nạp vào panel này. Không chạy lại lệnh cũ.");
+        this.setUiStatus("Đang nạp bản mới…");
+        for (i = 0; i < keys.length; i += 1) { present[i] = $.global.hasOwnProperty(keys[i]); previous[i] = $.global[keys[i]]; }
+        try {
+            $.global.__CODEX_AE_WORKSPACE_ROOT__ = bundle.parent.parent.fsName;
+            $.global.__CODEX_AE_PANEL_HOST__ = this.window instanceof Panel ? this.window : undefined;
+            $.global.__CODEX_AE_AUTOSTART_ONLY__ = false;
+            $.evalFile(bundle);
+            return true;
+        } catch (loadError) {
+            this.log("error", "Không nạp được bản mới, giữ bản hiện tại: " + this.describeError(loadError));
+            return false;
+        } finally {
+            for (i = 0; i < keys.length; i += 1) {
+                if (present[i]) { $.global[keys[i]] = previous[i]; } else { delete $.global[keys[i]]; }
+            }
+        }
+    };
+
+    Bridge.prototype.start = function (reason) {
+        if (this.connectionActionActive || this.scheduledCallbackActive ||
+                (this.busy && !this.pendingReport && !this.pendingCleanupFile)) {
+            this.logOnce("reconnect-busy", "warning", "Reconnect deferred: a bridge operation is still active; session=" + this.sessionNonce);
+            return false;
+        }
+        if (!this.ensureListenerOwner(reason || "start", true)) { return false; }
+        if (String(reason || "").indexOf("Reconnect") === 0 && !this.pendingReport && !this.pendingCleanupFile &&
+                this.loadNewerInstallation()) { return true; }
+        this.connectionActionActive = true;
         try {
             // A ScriptUI panel can be closed while its named engine survives.
             // Always replace the old task instead of trusting a stale running
@@ -2855,28 +3415,41 @@
                 }
             }
             this.generation += 1;
+            this.taskToken += 1;
             if (this.library) { this.library.stop(); }
             this.taskId = 0;
+            this.taskDueAt = 0;
             this.running = true;
+            this.manualStop = false;
             this.ready = false;
             this.busy = this.pendingReport !== null || this.pendingCleanupFile !== null;
             this.setConnectionStatus(false, "Connecting...");
             this.startupStep = 0;
             this.hideProgressPending = false;
             this.lastHeartbeat = 0;
+            this.lastHeartbeatCheckAt = 0;
+            this.heartbeatPublicationVerified = false;
+            this.connectionRecoveryPending = true;
             this.showProgress();
             this.setProgress(0, "Initializing");
-            this.setUiStatus("Bridge " + BRIDGE_VERSION + " starting...");
-            this.log("info", "Connecting automatically to workspace bridge");
+            this.setUiStatus(String(reason || "").indexOf("Reconnect") === 0 ? "Đang kết nối lại…" : "Bridge " + BRIDGE_VERSION + " starting...");
+            this.log("info", "Connecting automatically to workspace bridge; session=" + this.sessionNonce +
+                "; generation=" + this.generation + "; reason=" + String(reason || "auto start").substring(0, 80));
             this.scheduleNext(60);
+            return true;
         } catch (startError) {
             this.failStartup(startError);
+            return false;
+        } finally {
+            this.connectionActionActive = false;
         }
     };
 
     Bridge.prototype.stop = function () {
+        this.manualStop = true;
         this.log("info", "Bridge stopped by user");
         this.generation += 1;
+        this.taskToken += 1;
         if (this.library) { this.library.stop(); }
         this.refreshLibraryDisplay();
         if (this.taskId) {
@@ -2888,6 +3461,7 @@
         }
 
         this.taskId = 0;
+        this.taskDueAt = 0;
         this.running = false;
         this.ready = false;
         this.setConnectionStatus(false, "Disconnected");
@@ -2904,204 +3478,295 @@
     };
 
     Bridge.prototype.showWindow = function () {
+        this.recoverScheduled("panel shown");
         if (this.window) {
             if (this.window instanceof Window) {
                 this.window.show();
             } else {
-                this.window.layout.layout(true);
+                this.reflowUi();
             }
         }
     };
 
-    var bridge;
-    if (existingBridge && existingBridge.version === BRIDGE_VERSION) {
-        bridge = existingBridge;
-    } else {
-        if (existingBridge && existingBridge.stop) {
-            try {
-                existingBridge.stop();
-            } catch (oldBridgeError) {
-                // Continue replacing an outdated controller.
-            }
-        }
+    var bridge, preserveConnection = false;
+    if (existingBridge && existingBridge.version === BRIDGE_VERSION && sameWorkspace) {
+        bridge = existingBridge; preserveConnection = !!bridge.hadUi;
+    }
+    else {
+        if (existingBridge && existingBridge.stop) { try { existingBridge.stop(); } catch (oldBridgeError) {} }
+        if (existingBridge) { releaseBridgeUi(existingBridge); }
         bridge = new Bridge(WORKSPACE_ROOT);
     }
     $.global[GLOBAL_NAME] = bridge;
+    if (autoStartOnly) { bridge.start(); return; }
+    if (bridge.window || bridge.ui) { releaseBridgeUi(bridge); }
+    var palette = (thisObject instanceof Panel) ? thisObject : new Window("palette", "Codex AE", undefined, { resizeable: true });
+    palette.orientation = "column"; palette.alignChildren = ["fill", "top"];
+    palette.margins = 9; palette.spacing = 6;
+    palette.preferredSize = [440, 310]; palette.minimumSize = [340, 220];
+    if (palette instanceof Window) { palette.size = [440, 310]; }
 
-    if (autoStartOnly) {
-        bridge.start();
-        return;
+    // ScriptUI keeps its native controls/keyboard behavior. Styling is optional
+    // so an AE host without custom graphics can still connect and display errors.
+    var cartoonInk = [0.92, 0.94, 0.98, 1];
+    var cartoonPaper = [0.105, 0.12, 0.15, 1];
+    var cartoonCard = [0.14, 0.16, 0.20, 1];
+    var cartoonField = [0.075, 0.09, 0.12, 1];
+    function cartoonSurface(control, color, fontName, fontSize) {
+        try {
+            if (fontName) { control.graphics.font = ScriptUI.newFont(fontName, "REGULAR", fontSize); }
+        } catch (fontThemeError) { /* Use the host font if unavailable. */ }
+        try {
+            var graphics = control.graphics;
+            graphics.backgroundColor = graphics.newBrush(graphics.BrushType.SOLID_COLOR, color);
+            graphics.foregroundColor = graphics.newPen(graphics.PenType.SOLID_COLOR, cartoonInk, 1);
+            graphics.disabledBackgroundColor = graphics.newBrush(graphics.BrushType.SOLID_COLOR, color);
+            graphics.disabledForegroundColor = graphics.newPen(graphics.PenType.SOLID_COLOR, [0.62, 0.66, 0.74, 1], 1);
+        } catch (themeError) { /* Native host styling remains usable. */ }
     }
-
-    var palette = (thisObject instanceof Panel) ?
-        thisObject :
-        new Window("palette", "Codex AE Bridge " + BRIDGE_VERSION, undefined, { resizeable: true });
-    palette.orientation = "column";
-    palette.alignChildren = ["fill", "top"];
-    palette.margins = 12;
-
-    var connectionText = palette.add("statictext", undefined, "\uD83D\uDC4E DISLIKE - Connecting...");
-    connectionText.alignment = ["fill", "top"];
-    try {
-        connectionText.graphics.font = ScriptUI.newFont("Segoe UI Emoji", "REGULAR", 16);
-    } catch (connectionFontError) {
-        // LIKE / DISLIKE labels remain readable if emoji fonts are unavailable.
+    // EditText owns selection, keyboard and wheel scrolling. ScriptUI calls this
+    // option "scrollable"; "scrolling" is ignored. Keep one native vertical rail
+    // per pane, without extra frames or a second custom scroll state. Its OS rail
+    // color is not exposed by ScriptUI graphics.
+    function cartoonText(parent, text, readonly) {
+        var control = parent.add("edittext", undefined, text || "", {
+            multiline: true, readonly: !!readonly, scrollable: true, borderless: true
+        });
+        cartoonSurface(control, cartoonField, "Segoe UI", 12);
+        return control;
     }
-    connectionText.helpTip = "LIKE: AE bridge is running and publishing heartbeat. DISLIKE: starting, stopped, or connection error. This shows bridge availability, not whether a Codex chat is currently working.";
-
-    var statusText = palette.add("statictext", undefined, "Starting bridge...", { multiline: true });
-    statusText.preferredSize = [420, 48];
-
-    var modelText = palette.add("statictext", undefined, "Codex model: loading...");
-    modelText.alignment = ["fill", "top"];
-    modelText.helpTip = "Configured default, synced when selecting a model or submitting JSX. A chat can override it. This does not identify the approval reviewer model.";
-
-    var libraryText = palette.add("statictext", undefined, "Library: connect to scan effects and SFX", { multiline: true });
-    libraryText.alignment = ["fill", "top"];
-    libraryText.preferredSize = [420, 36];
-    libraryText.helpTip = "Read-only effects, applied parameter schemas, project audio and configured disk SFX. Refreshes on connection and every 2 minutes while idle. Independent of installation-only script validation. See .ae-codex/library/current.json for paths and errors.";
-
-    var scriptsText = palette.add("statictext", undefined, "Scripts: waiting for bundle index", { multiline: true });
-    scriptsText.alignment = ["fill", "top"];
-    scriptsText.preferredSize = [420, 36];
-    var scriptButtons = palette.add("group");
-    var viewScriptsButton = scriptButtons.add("button", undefined, "Archive...");
-    var viewFunctionsButton = scriptButtons.add("button", undefined, "Tools...");
-    viewScriptsButton.onClick = function () { bridge.showScripts(); };
-    viewFunctionsButton.onClick = function () { bridge.showFunctions(); };
-
-    var progressGroup = palette.add("group");
-    progressGroup.orientation = "column";
-    progressGroup.alignment = ["fill", "top"];
-    progressGroup.alignChildren = ["fill", "top"];
-    progressGroup.spacing = 4;
-
-    var progressText = progressGroup.add("statictext", undefined, "Loading - 0%");
-    progressText.alignment = ["fill", "top"];
-
-    var progressBar = progressGroup.add("progressbar", undefined, 0, 100);
-    progressBar.alignment = ["fill", "top"];
-    progressBar.preferredSize = [420, 14];
-
+    function cartoonButton(control, color) {
+        control.preferredSize = [110, 32];
+        cartoonSurface(control, color, "Segoe UI", 12);
+        // Leave painting to AE. Custom onDraw can lose the entire button after
+        // docking or a native graphics reset, including its fallback drawing.
+        // Native controls retain disabled, keyboard and focus behavior without
+        // cached paint handles or a redraw timer.
+    }
+    function cartoonDialog(dialog, search, list, detail, close) {
+        cartoonSurface(dialog, cartoonPaper);
+        cartoonSurface(search, cartoonField, "Segoe UI", 12);
+        cartoonSurface(list, cartoonField, "Segoe UI", 12);
+        cartoonSurface(detail, cartoonCard, "Segoe UI", 12);
+        cartoonButton(close, [0.27, 0.24, 0.43, 1]);
+    }
+    cartoonSurface(palette, cartoonPaper);
+    var title = palette.add("statictext", undefined, "Codex AE · Công cụ & kết nối");
+    var connectionText = palette.add("statictext", undefined, "Đang kết nối After Effects…");
+    connectionText.helpTip = "Trạng thái cầu nối AE trên máy này. Dùng Codex để gọi công cụ qua MCP.";
+    var statusText = palette.add("statictext", undefined, "Đang khởi động cầu nối…", { multiline: true });
+    var scriptsText = palette.add("statictext", undefined, "Đang tải danh mục công cụ…", { multiline: true });
+    var libraryText = palette.add("statictext", undefined, "Thư viện chỉ cập nhật khi bạn bấm nút.", { multiline: true });
+    var libraryOptions = palette.add("group");
+    var effectsToggle = libraryOptions.add("checkbox", undefined, "Effects");
+    var sfxToggle = libraryOptions.add("checkbox", undefined, "SFX");
+    var sfxFoldersButton = libraryOptions.add("button", undefined, "Thư mục…");
+    var refreshLibraryButton = libraryOptions.add("button", undefined, "Cập nhật");
+    effectsToggle.value = false; sfxToggle.value = false;
+    effectsToggle.enabled = sfxToggle.enabled = sfxFoldersButton.enabled = refreshLibraryButton.enabled = false;
+    effectsToggle.helpTip = "Chọn kiểm kê effects. Không tắt effects hay layer trong project; không tự quét khi đổi lựa chọn.";
+    sfxToggle.helpTip = "Chọn kiểm kê SFX đã cho phép. Không tắt âm thanh trong project; không tự quét khi đổi lựa chọn.";
+    refreshLibraryButton.helpTip = "Chỉ lập chỉ mục thư viện theo yêu cầu; không bật/tắt effects, layer hay âm thanh trong project.";
+    sfxFoldersButton.helpTip = "Thêm hoặc đổi thư mục SFX trên ổ đĩa. Chỉ lưu lựa chọn; không tự quét, tự bật SFX hay xóa dữ liệu.";
+    effectsToggle.onClick = function () { bridge.setLibraryEnabled("effects", !!effectsToggle.value); };
+    sfxToggle.onClick = function () { bridge.setLibraryEnabled("sfx", !!sfxToggle.value); };
+    refreshLibraryButton.onClick = function () { bridge.requestLibraryRefresh(); };
+    sfxFoldersButton.onClick = function () { bridge.showSfxFolders(); };
     var buttons = palette.add("group");
-    buttons.orientation = "row";
-    buttons.alignment = ["right", "top"];
-    var startButton = buttons.add("button", undefined, "Reconnect");
-    startButton.helpTip = "Reconnect after Stop or a connection error. The panel connects automatically when opened.";
-    var stopButton = buttons.add("button", undefined, "Stop");
-
+    var viewFunctionsButton = buttons.add("button", undefined, "Công cụ");
+    var viewScriptsButton = buttons.add("button", undefined, "Kho script");
+    var startButton = buttons.add("button", undefined, "Kết nối lại");
+    var stopButton = buttons.add("button", undefined, "Dừng");
+    viewFunctionsButton.onClick = function () { bridge.showFunctions(); };
+    viewScriptsButton.onClick = function () { bridge.showScripts(); };
     startButton.onClick = function () {
-        bridge.start();
+        if (bridge.ui !== attachedUi || bridge.window !== palette) { return; }
+        bridge.start("Reconnect button");
     };
-    stopButton.onClick = function () {
-        bridge.stop();
-    };
-
-    var logPanel = palette.add("panel", undefined, "Work log");
-    logPanel.orientation = "column";
-    logPanel.alignChildren = ["fill", "top"];
-    logPanel.alignment = ["fill", "fill"];
-    var logView = logPanel.add("edittext", undefined, "", { multiline: true, readonly: true, scrolling: true });
-    logView.preferredSize = [420, 160];
-    logView.minimumSize = [220, 90];
-    logView.alignment = ["fill", "fill"];
-    var clearLogButton = logPanel.add("button", undefined, "Clear view");
-    clearLogButton.alignment = ["right", "bottom"];
+    stopButton.onClick = function () { bridge.stop(); };
+    var progressGroup = palette.add("group");
+    var progressText = progressGroup.add("statictext", undefined, "Đang tải · 0%");
+    var progressBar = progressGroup.add("progressbar", undefined, 0, 100);
+    var logPanel = palette.add("panel", undefined, "Nhật ký làm việc");
+    var logView = cartoonText(logPanel, "", true);
+    var clearLogButton = logPanel.add("button", undefined, "Xóa nhật ký hiển thị");
     clearLogButton.onClick = function () { bridge.clearLog(); };
+    var footer = palette.add("group");
+    var logToggle = footer.add("button", undefined, "Nhật ký ▸");
+    var logSummary = footer.add("statictext", undefined, "Đang kết nối…");
+    logToggle.onClick = function () {
+        if (bridge.ui !== attachedUi || bridge.window !== palette) { return; }
+        bridge.ui.logExpanded = !bridge.ui.logExpanded; bridge.reflowUi(true);
+    };
+    cartoonSurface(palette, cartoonPaper); cartoonSurface(title, cartoonPaper, "Segoe UI", 14);
+    cartoonSurface(connectionText, cartoonPaper, "Segoe UI", 12); cartoonSurface(statusText, cartoonCard, "Segoe UI", 11);
+    cartoonSurface(scriptsText, cartoonPaper, "Segoe UI", 11); cartoonSurface(libraryText, cartoonPaper, "Segoe UI", 11);
+    cartoonSurface(effectsToggle, cartoonPaper, "Segoe UI", 11); cartoonSurface(sfxToggle, cartoonPaper, "Segoe UI", 11);
+    cartoonSurface(progressText, cartoonPaper, "Segoe UI", 11); cartoonSurface(logPanel, cartoonCard);
+    cartoonSurface(logSummary, cartoonPaper, "Segoe UI", 10);
+    cartoonButton(viewFunctionsButton, [0.19, 0.29, 0.46, 1]); cartoonButton(viewScriptsButton, [0.29, 0.24, 0.44, 1]);
+    cartoonButton(startButton, [0.16, 0.34, 0.27, 1]); cartoonButton(stopButton, [0.43, 0.22, 0.23, 1]);
+    cartoonButton(clearLogButton, [0.35, 0.29, 0.17, 1]); cartoonButton(logToggle, [0.22, 0.25, 0.31, 1]);
+    cartoonButton(refreshLibraryButton, [0.19, 0.29, 0.46, 1]);
+    cartoonButton(sfxFoldersButton, [0.29, 0.24, 0.44, 1]);
+    try {
+        bridge.connectionPens = {
+            connected: connectionText.graphics.newPen(connectionText.graphics.PenType.SOLID_COLOR, [0.47, 0.88, 0.66, 1], 1),
+            disconnected: connectionText.graphics.newPen(connectionText.graphics.PenType.SOLID_COLOR, [1, 0.55, 0.52, 1], 1)
+        };
+    } catch (connectionThemeError) { bridge.connectionPens = null; }
+    bridge.window = palette; bridge.statusText = statusText; bridge.connectionText = connectionText;
+    try { palette.__codexAeBridgeOwnerV1 = bridge; } catch (hostAnchorError) {}
+    bridge.scriptsText = scriptsText; bridge.libraryText = libraryText;
+    bridge.progressGroup = progressGroup; bridge.progressText = progressText; bridge.progressBar = progressBar;
+    bridge.logView = logView; bridge.logSummary = logSummary;
+    bridge.libraryControls = { effects: effectsToggle, sfx: sfxToggle, folders: sfxFoldersButton, refresh: refreshLibraryButton };
+    bridge.ui = { logExpanded: false, logVisible: false, layoutSignature: "" };
+    bridge.logViewRevision = -1;
+    bridge.hadUi = true;
+    var attachedUi = bridge.ui;
+    bridge.ui.actions = [
+        { control: effectsToggle, action: "effects" }, { control: sfxToggle, action: "sfx" },
+        { control: sfxFoldersButton, action: "folders" }, { control: refreshLibraryButton, action: "refresh" },
+        { control: viewFunctionsButton, action: "functions" }, { control: viewScriptsButton, action: "scripts" },
+        { control: startButton, action: "start" }, { control: stopButton, action: "stop" },
+        { control: clearLogButton, action: "clearLog" }, { control: logToggle, action: "toggleLog" }
+    ];
+    bridge.ownedUiRoots = [title, connectionText, statusText, scriptsText, libraryText, libraryOptions, buttons, progressGroup, logPanel, footer];
+    // TOOLS_LAYOUT_BEGIN: idle ticks reuse bounds and never rebuild controls.
+    function setToolsBounds(control, bounds) {
+        var actual = control.bounds, i, same = !!actual;
+        for (i = 0; same && i < 4; i += 1) { if (Number(actual[i]) !== bounds[i]) { same = false; } }
+        if (same) { return; }
+        control.minimumSize = [0, 0]; control.maximumSize = [100000, 100000]; control.bounds = bounds;
+    }
+    bridge.ui.reflow = function (force) {
+        if (bridge.ui !== attachedUi || bridge.window !== palette) { return; }
+        var size = palette.size, w = size && Number(typeof size.width === "number" ? size.width : size[0]),
+            h = size && Number(typeof size.height === "number" ? size.height : size[1]),
+            ui = bridge.ui, m = 9, gap = 6, width, signature, footerY, logHeight, logY, buttonY, libraryY, progressY, infoBottom, buttonWidth, i, controls;
+        if (!isFinite(w) || !isFinite(h) || w < 340 || h < 220) { return; }
+        signature = w + "|" + h + "|" + ui.logExpanded + "|" + progressGroup.visible;
+        if (!force && signature === ui.layoutSignature) { return; }
+        controls = [viewFunctionsButton, viewScriptsButton, startButton, stopButton];
+        width = w - m * 2; footerY = h - m - 26;
+        logHeight = ui.logExpanded && h >= 300 ? Math.min(140, Math.max(80, h - 252)) : 0;
+        logY = footerY - gap - logHeight;
+        progressY = logY - (progressGroup.visible ? 34 : 0) - gap;
+        buttonY = progressY - 30 - gap; libraryY = buttonY - 24 - gap; infoBottom = libraryY - gap;
+        setToolsBounds(title, [m, m, w - m, m + 23]); setToolsBounds(connectionText, [m, 37, w - m, 57]);
+        setToolsBounds(statusText, [m, 63, w - m, Math.max(63, Math.min(94, infoBottom))]);
+        setToolsBounds(scriptsText, [m, Math.min(99, infoBottom), w - m, Math.min(132, infoBottom)]);
+        setToolsBounds(libraryText, [m, Math.min(136, infoBottom), w - m, Math.max(Math.min(136, infoBottom), infoBottom)]);
+        setToolsBounds(libraryOptions, [m, libraryY, w - m, libraryY + 24]);
+        setToolsBounds(effectsToggle, [0, 0, 64, 24]); setToolsBounds(sfxToggle, [68, 0, 112, 24]);
+        setToolsBounds(sfxFoldersButton, [118, 0, 198, 24]); setToolsBounds(refreshLibraryButton, [204, 0, width, 24]);
+        setToolsBounds(buttons, [m, buttonY, w - m, buttonY + 30]);
+        buttonWidth = Math.floor((width - gap * 3) / 4);
+        for (i = 0; i < controls.length; i += 1) { setToolsBounds(controls[i], [i * (buttonWidth + gap), 0, i === 3 ? width : i * (buttonWidth + gap) + buttonWidth, 30]); }
+        setToolsBounds(progressGroup, [m, progressY, w - m, progressY + (progressGroup.visible ? 28 : 0)]);
+        setToolsBounds(progressText, [0, 0, width, 15]); setToolsBounds(progressBar, [0, 18, width, 27]);
+        setControl(logPanel, "visible", logHeight > 0); setToolsBounds(logPanel, [m, logY, w - m, logY + logHeight]);
+        setToolsBounds(logView, [6, 17, width - 6, Math.max(17, logHeight - 29)]);
+        setToolsBounds(clearLogButton, [6, Math.max(17, logHeight - 26), Math.min(width - 6, 184), Math.max(17, logHeight - 3)]);
+        setToolsBounds(footer, [m, footerY, w - m, footerY + 26]); setToolsBounds(logToggle, [0, 0, 96, 26]);
+        setToolsBounds(logSummary, [103, 3, width, 24]); setControl(logToggle, "text", logHeight > 0 ? "Nhật ký ▾" : "Nhật ký ▸");
+        setControl(logToggle, "helpTip", ui.logExpanded && !logHeight ? "Kéo panel cao hơn để mở nhật ký." : "Mở / thu gọn nhật ký công việc và lỗi.");
+        ui.layoutSignature = signature;
+        if (ui.logVisible !== (logHeight > 0)) {
+            ui.logVisible = logHeight > 0;
+            if (!ui.logVisible) { setControl(logView, "text", ""); bridge.logViewRevision = -1; }
+            else { bridge.refreshLog(); }
+        }
+    };
+    // TOOLS_LAYOUT_END
+    // AE can request layout again after docking without changing panel size.
+    // Keep one owner of bounds instead of letting the default auto-layout
+    // overwrite the manual layout behind its unchanged-size cache.
+    bridge.ui.nativeLayout = palette.layout;
+    bridge.ui.layoutManager = {
+        layout: function () { if (bridge.ui === attachedUi && bridge.window === palette) { bridge.reflowUi(true); } },
+        resize: function () { if (bridge.ui === attachedUi && bridge.window === palette) { bridge.reflowUi(true); } }
+    };
+    palette.layout = bridge.ui.layoutManager;
     if (palette instanceof Window) {
         palette.onClose = function () {
-            bridge.stop();
-            $.global[GLOBAL_NAME] = null;
-            return true;
+            if (bridge.ui !== attachedUi || bridge.window !== palette) { return true; }
+            bridge.stop(); releaseBridgeUi(bridge); $.global[GLOBAL_NAME] = null; return true;
         };
     }
-    palette.onResizing = palette.onResize = function () {
-        this.layout.resize();
+    palette.onActivate = palette.onResizing = palette.onResize = function () {
+        if (bridge.ui === attachedUi && bridge.window === palette) { bridge.reflowUi(true); }
     };
-
-    bridge.window = palette;
-    bridge.statusText = statusText;
-    bridge.connectionText = connectionText;
-    bridge.modelText = modelText;
-    bridge.libraryText = libraryText;
-    bridge.bundle = $.global.__codexAeBundleV1;
-    bridge.functions = $.global.__codexAeFunctionsV1;
-    bridge.scriptsText = scriptsText;
-    bridge.logView = logView;
+    rewireUiActions(bridge);
     bridge.refreshLog();
-    try { bridge.bundle.refresh(false); bridge.bundle.loadInstallation(); } catch (bundleError) {
-        bridge.bundle.error = String(bundleError);
-        bridge.log("error", "Bundle unavailable: " + String(bundleError));
-    }
-    bridge.refreshScriptsDisplay();
-    bridge.modelDisplayValue = "";
-    bridge.refreshModelDisplay();
-    bridge.progressGroup = progressGroup;
-    bridge.progressText = progressText;
-    bridge.progressBar = progressBar;
-    statusText.text = bridge.lastStatus || "Starting bridge...";
-    progressText.text = bridge.progressLabel + " - " + bridge.progressValue + "%";
-    progressBar.value = bridge.progressValue;
-    if (palette instanceof Window) {
-        palette.center();
-        palette.show();
-    } else {
-        palette.layout.layout(true);
-    }
-    // Opening the panel connects automatically; Stop remains explicit until reopened.
-    bridge.start();
+    try { bridge.bundle.refresh(false); bridge.bundle.loadInstallation(); }
+    catch (bundleError) { bridge.bundle.error = String(bundleError); bridge.log("error", "Không tải được bộ công cụ: " + String(bundleError)); }
+    bridge.refreshScriptsDisplay(); statusText.text = bridge.lastStatus || "Đang khởi động cầu nối…";
+    progressText.text = bridge.progressLabel + " · " + bridge.progressValue + "%"; progressBar.value = bridge.progressValue;
+    if (palette instanceof Window) { palette.center(); palette.show(); } else { palette.layout.layout(true); }
+    bridge.reflowUi(true);
+    if (preserveConnection) {
+        bridge.setConnectionStatus(bridge.running && bridge.ready && !bridge.connectionRecoveryPending && bridge.lastHeartbeat > 0 &&
+            new Date().getTime() - bridge.lastHeartbeat <= 10000, bridge.running ?
+            (bridge.ready ? "Connected / Ready for Codex" : "Connecting...") : "Disconnected");
+        bridge.refreshConnectionHealth();
+        bridge.refreshLibraryDisplay();
+        if (!bridge.running || (bridge.ready && !bridge.busy && !bridge.pendingReport)) { bridge.hideProgress(); }
+    } else if (preserveReplacementStop) { bridge.stop(); }
+    else { bridge.start(); }
 }(this));
 
 /* CODEX_AE_BUNDLE_DATA
-B	Codex Library.jsx	0	18	621478843		204995051
+B	Codex Library.jsx	0	18	621675454		129281743
 B	adapt-cartoon-vortex-to-toy-scene-30s.jsx	19	298	373374799		263456842
 B	adapt-portrait-edit-to-existing-landscape.jsx	318	55	1243679648		2043049467
-B	add-active-rwd007-portrait-win.jsx	374	17	568656796		511422878
-B	add-axel-f-audio-beat-markers.jsx	392	77	2173440081		2729057906
-B	add-cartoon-dodge-sfx.jsx	470	17	559809416		2581278218
+B	add-active-rwd007-portrait-win.jsx	374	17	567083930		511422878
+B	add-axel-f-audio-beat-markers.jsx	392	77	2171474006		2729057906
+B	add-cartoon-dodge-sfx.jsx	470	17	572851096		2581278218
 B	add-dash-combos-and-level-win.jsx	488	18	627114946		698033230
 B	add-gameplay-hands-all-eight.jsx	507	17	569115555		2843061509
 B	add-generated-synced-level-walls.jsx	525	57	1672481816		233092445
-B	add-grass-perimeter-background.jsx	583	97	4071167097		1477866095
+B	add-grass-perimeter-background.jsx	583	97	4041151601		1477866095
 B	add-hard-danger-red-current-comps.jsx	681	55	1259080624		2798617125
 B	add-hard-danger-red-screen.jsx	737	156	890511648		3662179237
 B	add-knife-miss-vfx.jsx	894	98	105125043		2368972259
 B	add-miss-swoosh-both.jsx	993	96	3999405200		867034078
 B	add-opening-carousel-sfx.jsx	1090	17	574686120		3639732722
-B	add-outro-play-text.jsx	1108	17	569443231		2286022186
-B	add-overhead-caption-shadow.jsx	1126	17	568132511		1636390072
+B	add-outro-play-text.jsx	1108	17	567870365		2286022186
+B	add-overhead-caption-shadow.jsx	1126	17	566559645		1636390072
 B	add-pickle-lower-lids.jsx	1144	98	190911664		1404384142
 B	add-player-click-ripples.jsx	1243	97	4209054885		2646817889
 B	add-portal-closing-light.jsx	1341	183	3996460683		402297153
 B	add-portrait-grass-background.jsx	1525	17	573244323		619209114
 B	add-pro-combo-popups.jsx	1543	77	2172784730		514058497
-B	add-reference-miss-captions.jsx	1621	17	571605921		992834834
+B	add-reference-miss-captions.jsx	1621	17	570033055		992834834
 B	add-reference-taunt-captions.jsx	1639	59	2069171324		3567209480
 B	add-rwd007-cartoon-sound-design.jsx	1699	196	4247988608		3300152545
 B	add-rwd008-difficulty-voices.jsx	1896	100	795415828		9845796
-B	add-selector-purple-background.jsx	1997	96	3689026629		2282575820
+B	add-selector-purple-background.jsx	1997	96	3659535421		2282575820
 B	add-teleport-intake-deep-glow.jsx	2094	18	628491211		2723118009
-B	add-text-layer.jsx	2113	58	1870466125		280844717
+B	add-text-layer.jsx	2113	58	1870728275		280844717
 B	add-vd057-level-complete-and-outro.jsx	2172	17	566559643		1128205508
-B	add-versus-divider-lines.jsx	2190	114	1979979809		1591091222
+B	add-versus-divider-lines.jsx	2190	114	1966217252		1591091222
 B	add-wrong-tap-sounds.jsx	2305	36	2410416031		2724000723
-B	align-all-walls-to-user-reference.jsx	2342	55	1316555714		4030627228
+B	align-all-walls-to-user-reference.jsx	2342	55	1308429246		4030627228
 B	align-combo-sounds-to-payoffs.jsx	2398	17	579273641		2241813320
-B	align-comp1-purple-contour.jsx	2416	75	1570967499		3222898981
+B	align-comp1-purple-contour.jsx	2416	75	1594888142		3222898981
 B	align-portal-mask-to-camera.jsx	2492	136	3396541660	capture-inspection-frame.jsx	1311962937
 B	align-praise-sfx-to-gameplay.jsx	2629	57	1668156451		1670727531
 B	anchor-landscape-knife-to-walls.jsx	2687	56	1456606168		1682607071
 B	animate-game-selector-5s.jsx	2744	133	1909333062		2875103820
-B	animate-outro-hand-sway.jsx	2878	113	1613764606		1271274640
+B	animate-outro-hand-sway.jsx	2878	113	1589516278		1271274640
 B	animate-pickle-funny-taunt-10s.jsx	2992	345	4082321516		1153199282
-B	animate-play-fill-color.jsx	3338	36	2400454554		4242975676
+B	animate-play-fill-color.jsx	3338	36	2398881688		4242975676
 B	apply-active-background-soften.jsx	3375	17	566690720	capture-inspection-frame.jsx	4117757377
 B	apply-cartoon-combos-and-sync-dash2-sfx.jsx	3393	36	2407860134		3886524661
 B	apply-combo-x8-green.jsx	3430	137	3919912240		1336668403
 B	apply-complete-square-crossings.jsx	3568	471	1526948848		335404328
 B	apply-four-comps-33s.jsx	4040	98	233772242		3611381718
 B	apply-iw-cartoon-difficulty-text.jsx	4139	17	571278244		1713478392
-B	apply-measured-wall-light-keys.jsx	4157	36	2397177752		2548818358
+B	apply-measured-wall-light-keys.jsx	4157	36	2402617247		2548818358
 B	apply-outlined-squares-small-hand.jsx	4194	396	630674399		583786025
 B	apply-prearrival-square-presses.jsx	4591	627	1938982127		2949373009
 B	apply-rtfx-epic-perfect-highlights.jsx	5219	137	3499367642		3691125859
@@ -3111,7 +3776,7 @@ B	apply-rwd007-early-hand-asmr-sfx.jsx	5617	57	1636830216		674457473
 B	apply-rwd007-element-sfx-library.jsx	5675	199	2103978521		10455459
 B	apply-rwd007-hand-pink-perfect-fast-title.jsx	5875	137	3667795200		856418995
 B	apply-rwd007-perfect-cool-effects-sfx.jsx	6013	97	4094694547		332372531
-B	apply-tracked-wall-embedded-zoom.jsx	6111	36	2392786827		2373366215
+B	apply-tracked-wall-embedded-zoom.jsx	6111	36	2391213961		2373366215
 B	apply-train-head-taps.jsx	6148	236	603271668		2631005280
 B	apply-vd057-current-gameplay-hand.jsx	6385	138	3993378067		1786248103
 B	apply-vd057-destination-hand.jsx	6524	711	4265186816		1780420365
@@ -3120,2886 +3785,2884 @@ B	apply-vd057-full-tray-praise.jsx	7296	18	631833551		55971406
 B	apply-vd057-hand-sfx-transfer.jsx	7315	59	2031619188		769986135
 B	apply-vd057-portal-sfx.jsx	7375	96	3886290019		3581773733
 B	apply-vd057-stop-click-sequence.jsx	7472	358	3899149142		2779746947
-B	audit-cartoon-combo-sfx.jsx	7831	75	1616842728		1013967729
-B	audit-classic-element-overlays.jsx	7907	94	3006665693		3538012207
-B	audit-comp1-after-library-camera-timing.jsx	8002	16	512426869		674126091
-B	audit-comp1-broken-edges.jsx	8019	16	509608818		3743898019
-B	audit-comp1-camera-key-times.jsx	8036	16	518980468		2385452081
-B	audit-comp1-edge-source.jsx	8053	54	1097010047		4104372801
-B	audit-current-two-gate-layout.jsx	8108	115	2285049915		250887950
-B	audit-partial-vortex-rig.jsx	8224	116	2629638262		3639430776
-B	audit-rwd007-choice-projection.jsx	8341	152	2806784033		963884578
+B	audit-cartoon-combo-sfx.jsx	7831	75	1604259810		1013967729
+B	audit-classic-element-overlays.jsx	7907	94	3147174905		3538012207
+B	audit-comp1-after-library-camera-timing.jsx	8002	16	510985075		674126091
+B	audit-comp1-broken-edges.jsx	8019	16	514589561		3743898019
+B	audit-comp1-camera-key-times.jsx	8036	16	517538674		2385452081
+B	audit-comp1-edge-source.jsx	8053	54	1103301506		4104372801
+B	audit-current-two-gate-layout.jsx	8108	115	2250709043		250887950
+B	audit-partial-vortex-rig.jsx	8224	116	2609584240		3639430776
+B	audit-rwd007-choice-projection.jsx	8341	152	2769952793		963884578
 B	audit-rwd007-client-feedback.jsx	8494	54	1091701635	capture-inspection-frame.jsx	1341577884
-B	audit-rwd007-retime.jsx	8549	74	1328549799		3417858342
-B	audit-rwd007-sound-design.jsx	8624	116	2755795084		1617891465
-B	audit-rwd008-difficulty-audio.jsx	8741	74	1322651558		451537064
-B	audit-rwd008-mode-title-design.jsx	8816	58	1830161469		993090444
-B	audit-unused-dash-layers.jsx	8875	17	567018392		210866911
-B	audit-vd057-layer6-portal.jsx	8893	77	2084245542		3604203812
-B	audit-vd057-praise-original-diff.jsx	8971	214	196160831		2122516304
+B	audit-rwd007-retime.jsx	8549	74	1320685475		3417858342
+B	audit-rwd007-sound-design.jsx	8624	116	2769033357		1617891465
+B	audit-rwd008-difficulty-audio.jsx	8741	74	1345523629		451537064
+B	audit-rwd008-mode-title-design.jsx	8816	58	1823214651		993090444
+B	audit-unused-dash-layers.jsx	8875	17	572457887		210866911
+B	audit-vd057-layer6-portal.jsx	8893	77	2075856930		3604203812
+B	audit-vd057-praise-original-diff.jsx	8971	214	345320775		2122516304
 B	audit-vd057-wide-hand-keys.jsx	9186	77	2154827844		1719975045
-B	audit-vortex-suction-input.jsx	9264	36	2411595674		329663301
-B	avoid-landscape-miss-balloon-overlap.jsx	9301	114	1825708043		3884097052
+B	audit-vortex-suction-input.jsx	9264	36	2410022808		329663301
+B	avoid-landscape-miss-balloon-overlap.jsx	9301	114	1874008087		3884097052
 B	balance-reference-pickle-stance.jsx	9416	214	650456442		2502456018
-B	blink-play-white-red.jsx	9631	74	1369116590		1424628612
-B	boost-dodge-boing-volume.jsx	9706	54	1093929874		3441469683
-B	boost-head-caption-contrast.jsx	9761	17	560399239	capture-inspection-frame.jsx	2795385759
-B	boost-miss-drip-and-copy-wide.jsx	9779	17	565969816		3206640677
-B	boost-praise-voice-volume.jsx	9797	73	1120341890		4251429656
+B	blink-play-white-red.jsx	9631	74	1386221489		1424628612
+B	boost-dodge-boing-volume.jsx	9706	54	1082002316		3441469683
+B	boost-head-caption-contrast.jsx	9761	17	573440919	capture-inspection-frame.jsx	2795385759
+B	boost-miss-drip-and-copy-wide.jsx	9779	17	571409311		3206640677
+B	boost-praise-voice-volume.jsx	9797	73	1112346494		4251429656
 B	build-comp1-contour-element-fx.jsx	9871	201	3154324048		2692894716
 B	build-deep-cartoon-suction-rig.jsx	10073	18	627835850		442494683
 B	build-rounded-cartoon-combo-art.jsx	10092	351	1687243401		3578787059
 B	build-rwd007-native-win-celebration.jsx	10444	60	2243103897		2821534880
 B	build-short-miss-edits.jsx	10505	314	4251009630		199547149
 B	build-spring-spear-ad45.jsx	10820	18	632357839		1958074165
-B	capture-active-rwd007-portrait-win.jsx	10839	133	1754471466	capture-inspection-frame.jsx	821590060
-B	capture-ad-reference-levels.jsx	10973	17	569901973	capture-inspection-frame.jsx	2472460385
-B	capture-balloon-cut.jsx	10991	54	1113852815	capture-inspection-frame.jsx	24698361
-B	capture-before-33s.jsx	11046	35	2299594616		3791557304
-B	capture-combo-onsets.jsx	11082	35	2294810487	capture-inspection-frame.jsx	2941217113
-B	capture-comp1-gate-plugin-check.jsx	11118	35	2270955357	capture-inspection-frame.jsx	1052859468
-B	capture-comp1-my-library-arrow.jsx	11154	53	844565320	capture-inspection-frame.jsx	993287237
-B	capture-comp1-my-library-bridge.jsx	11208	35	2295990129	capture-inspection-frame.jsx	2187620102
-B	capture-comp1-my-library-completion.jsx	11244	35	2270299997	capture-inspection-frame.jsx	2332384378
-B	capture-comp1-my-library-portal-final.jsx	11280	53	858721101	capture-inspection-frame.jsx	632576449
-B	capture-comp1-outro-3s-final.jsx	11334	35	2272397151	capture-inspection-frame.jsx	1052793932
-B	capture-comp1-prearrival-arrow.jsx	11370	35	2276984677	capture-inspection-frame.jsx	2353027416
-B	capture-comp1-prearrival-bridge.jsx	11406	35	2280851300	capture-inspection-frame.jsx	582506939
-B	capture-comp1-prearrival-portal.jsx	11442	69	83889835	capture-inspection-frame.jsx	599415229
-B	capture-comp1-prearrival-purple-gate.jsx	11512	35	2279475043	capture-inspection-frame.jsx	1903712755
-B	capture-comp1-smooth-outro-transition.jsx	11548	53	854068045	capture-inspection-frame.jsx	385244718
-B	capture-complete-crossing-proof.jsx	11602	232	1990930719		3244651355
-B	capture-continuous-player-tracks.jsx	11835	156	612507891		3122595021
-B	capture-current-gate-perspective.jsx	11992	56	1479871466	capture-inspection-frame.jsx	916574789
-B	capture-dash-15s-portrait-celebration.jsx	12049	74	1445924793	capture-inspection-frame.jsx	2571934787
-B	capture-dash-15s-portrait-outro.jsx	12124	54	1100548987	capture-inspection-frame.jsx	2572328003
-B	capture-dash-15s-portrait-portal.jsx	12179	72	901058393	capture-inspection-frame.jsx	2539559999
-B	capture-dash-15s-wide-before-outro.jsx	12252	16	506659690	capture-inspection-frame.jsx	3691289885
-B	capture-dash-15s-wide-celebration.jsx	12269	53	914623327	capture-inspection-frame.jsx	2544671809
-B	capture-dash-15s-wide-completion.jsx	12323	53	909445975	capture-inspection-frame.jsx	2512034877
-B	capture-dash-15s-wide-outro.jsx	12377	53	910101336	capture-inspection-frame.jsx	2561186883
-B	capture-dash-source-before-wide.jsx	12431	16	507052898	capture-inspection-frame.jsx	137146802
-B	capture-dash-wide-arrow.jsx	12448	72	894570325	capture-inspection-frame.jsx	1594924163
-B	capture-dash-wide-outro.jsx	12521	91	2168394585	capture-inspection-frame.jsx	4043152572
-B	capture-dash-wide-overview.jsx	12613	54	1094191994	capture-inspection-frame.jsx	190094617
-B	capture-dash-wide-portal.jsx	12668	72	890244946	capture-inspection-frame.jsx	2095291624
-B	capture-final-short-crossing.jsx	12741	128	3759479606		1654526472
-B	capture-final-square-hand-examples.jsx	12870	73	1082265474		2904706757
-B	capture-inspection-frame.jsx	12944	60	2251885727		1328033951
-B	capture-knife-miss-vfx.jsx	13005	72	964497267	capture-inspection-frame.jsx	1964894333
-B	capture-landscape-before.jsx	13078	95	3367113732	capture-inspection-frame.jsx	1336135161
-B	capture-landscape-miss-placement.jsx	13174	132	1312627705	capture-inspection-frame.jsx	2657332450
-B	capture-landscape-wall-and-jump-check.jsx	13307	96	3778810979	capture-inspection-frame.jsx	2430141528
-B	capture-level-action-times.jsx	13404	54	1079118715	capture-inspection-frame.jsx	4070905498
-B	capture-miss-cue-positions.jsx	13459	57	1681853476	capture-inspection-frame.jsx	1115702020
-B	capture-miss-reference-details.jsx	13517	96	3753055313	capture-inspection-frame.jsx	160563412
-B	capture-movie002-later-springs.jsx	13614	57	1682705438	capture-inspection-frame.jsx	4110266279
-B	capture-movie002-spring-reference.jsx	13672	95	3550942275	capture-inspection-frame.jsx	989825144
-B	capture-outlined-small-hand-examples.jsx	13768	111	782243742		4172227234
-B	capture-outro-brand-review.jsx	13880	35	2276788073	capture-inspection-frame.jsx	1315521948
-B	capture-pickle-motion-samples.jsx	13916	17	577438625	capture-inspection-frame.jsx	1991684945
-B	capture-player-hand-route-review.jsx	13934	55	1231424423		1394194611
-B	capture-pro-combo-review.jsx	13990	73	1151274886	capture-inspection-frame.jsx	1018380279
-B	capture-pro-entry-mask.jsx	14064	93	2808222670	capture-inspection-frame.jsx	2298950508
-B	capture-pro-mask-review.jsx	14158	74	1355485110	capture-inspection-frame.jsx	2020227373
-B	capture-reference-15-17-detail.jsx	14233	96	3819574378	capture-inspection-frame.jsx	3225546165
-B	capture-reference-pickle-15-18.jsx	14330	56	1459424230	capture-inspection-frame.jsx	487162662
-B	capture-refined-first45-contacts.jsx	14387	192	1552623798		1565069581
-B	capture-rtfx-energy006-source.jsx	14580	37	2538342360	capture-inspection-frame.jsx	3900153667
-B	capture-rwd007-corrected-tight-clicks.jsx	14618	111	688854909	capture-inspection-frame.jsx	838430843
-B	capture-rwd007-hand-planning.jsx	14730	171	1210786906	capture-inspection-frame.jsx	3674708527
-B	capture-rwd007-portal-asmr-plan.jsx	14902	170	426124306	capture-inspection-frame.jsx	3171962333
-B	capture-rwd007-praise-candidate-events.jsx	15073	55	1278282673	capture-inspection-frame.jsx	508488787
-B	capture-rwd007-praise-onset-frames.jsx	15129	113	1620842489	capture-inspection-frame.jsx	2043734390
-B	capture-rwd007-refined-choice-frames.jsx	15243	131	763173816		3234943103
-B	capture-rwd007-route-clean-reference.jsx	15375	35	2281375607		903276199
-B	capture-rwd007-rtfx-epic-portrait15.jsx	15411	37	2577532905	capture-inspection-frame.jsx	1670694741
-B	capture-rwd007-rtfx-epic-wide-peak.jsx	15449	75	1787367451	capture-inspection-frame.jsx	3261974293
-B	capture-rwd007-rtfx-epic-wide.jsx	15525	94	3322352683	capture-inspection-frame.jsx	3326723865
-B	capture-rwd007-rtfx-perfect-portrait.jsx	15620	37	2582120431	capture-inspection-frame.jsx	1841547502
-B	capture-rwd007-rtfx-perfect-wide15.jsx	15658	16	516162419	capture-inspection-frame.jsx	3991456026
-B	capture-rwd007-train-timing-probes.jsx	15675	93	2820412353	capture-inspection-frame.jsx	3855176923
-B	capture-rwd008-mode-titles-before.jsx	15769	113	1543575543		2075282278
-B	capture-train-head-tap-samples.jsx	15883	113	1522407403		4014453024
-B	capture-upper-gate-crossings.jsx	15997	206	3014142901	capture-inspection-frame.jsx	2662692178
-B	capture-vd007-background-hold.jsx	16204	16	519439229	capture-inspection-frame.jsx	3561777893
-B	capture-vd057-combo-180.jsx	16221	171	1275208793	capture-inspection-frame.jsx	1334152909
-B	capture-vd057-end-before-edit.jsx	16393	131	902306761	capture-inspection-frame.jsx	3616210038
-B	capture-vd057-landscape-preflight.jsx	16525	169	66724853	capture-inspection-frame.jsx	1506756193
-B	capture-vd057-last-gameplay-check.jsx	16695	150	1867456462	capture-inspection-frame.jsx	3297246318
-B	capture-vd057-portal-reference.jsx	16846	192	1868507327	capture-inspection-frame.jsx	3546483269
-B	capture-vd057-praise-180.jsx	17039	171	1229268043	capture-inspection-frame.jsx	1386516755
-B	capture-vd057-unstoppable-180.jsx	17211	171	1271276632	capture-inspection-frame.jsx	3532165332
-B	capture-vd057-wide-hand-check.jsx	17383	172	1857889421	capture-inspection-frame.jsx	1132241224
-B	capture-vd057-win130-full-dim.jsx	17556	171	1211704396	capture-inspection-frame.jsx	732663562
-B	capture-wide-wall-reference-fixed.jsx	17728	54	1049824109	capture-inspection-frame.jsx	4242385950
-B	capture-wide-wall-reference.jsx	17783	72	840634186	capture-inspection-frame.jsx	3704792627
-B	catalog-installed-plugins.jsx	17856	99	411309266		3545335397
-B	center-enlarge-vd057-wide-combo-180.jsx	17956	227	2882023558		1918783938
-B	center-enlarge-vd057-wide-praise-180.jsx	18184	115	2537035899		3735968049
-B	center-enlarge-vd057-wide-unstoppable-180.jsx	18300	228	3735040193		3573176262
-B	center-game3-hand.jsx	18529	57	1669729315		1824304206
-B	center-portrait-versus.jsx	18587	172	1214325826		645794087
-B	center-reference-leg-attachments.jsx	18760	173	2080974006		993447168
-B	center-vd057-wide-combo-text.jsx	18934	99	433198294	capture-inspection-frame.jsx	3551143558
-B	check-bridge-upgrade-source.jsx	19034	16	514327412	Codex Bridge.jsx	468021838
-B	check-comp1-target-for-arrow-blink.jsx	19051	16	506069861		3002512442
-B	check-core-users-first45.jsx	19068	16	510722926		348482125
-B	check-hand-vector-components.jsx	19085	16	509805420		441649931
-B	check-library-connection.jsx	19102	16	517538686	Codex Library.jsx	3855448674
-B	clean-comp1-bridge-border-verify-recut.jsx	19119	17	567739289		3384966078
-B	clone-vd008-wide-v2.jsx	19137	17	566887320		1652903331
-B	comp1-add-animation-composer-my-library-accents.jsx	19155	57	1633815554		1085600251
-B	comp1-all-elements-single-teleport-pan-30s.jsx	19213	101	1116345686		3425447155
-B	comp1-arrow-symbol-only-no-hex-blink.jsx	19315	55	1271991207		3311601773
-B	comp1-continuous-30s-centered-smooth-zoom.jsx	19371	360	3032697830		2857265185
-B	comp1-final-clean-completion-and-library-arrow.jsx	19732	96	3812168796		1095445914
-B	comp1-finish-celebration-smooth-outro-3s.jsx	19829	196	123873673		435051133
-B	comp1-finish-my-library-accent-visibility.jsx	20026	95	3397784594		3464794765
-B	comp1-first-intro-only-before-train-arrives.jsx	20122	461	4179059025		240089905
-B	comp1-magenta-arrow-symbol-blink.jsx	20584	57	1599540212		1212620208
-B	comp1-remove-only-purple-completion-freeze.jsx	20642	156	994517305		299040944
-B	comp1-repair-prearrival-intros-preserve-remap.jsx	20799	403	710890749		4032228652
-B	comp1-rotating-arrow-glyph-blink.jsx	21203	158	1821188457		2838290992
-B	comp1-strong-clean-plugin-function-highlights.jsx	21362	156	658317563		3866158492
-B	complete-9x17-to-16x9.jsx	21519	17	572130209		3774885247
-B	complete-cartoon-combo-application.jsx	21537	235	337916408		2549261627
-B	complete-comp1-continuous-30s-centered-zoom.jsx	21773	322	4163126233		627412173
-B	complete-knife-miss-vfx.jsx	22096	347	188631422		3424821121
-B	complete-landscape-outro-fixed.jsx	22444	17	564069277		1185990852
-B	complete-portrait-15s-warning-final.jsx	22462	189	4061603862		3164390192
-B	complete-rounded-cartoon-combo-art.jsx	22652	74	1339232170		49425799
-B	complete-rtfx-epic-perfect-highlights.jsx	22727	17	563282836		3687404258
-B	complete-short-miss-edits.jsx	22745	117	3208059062		1046754463
-B	complete-soft-gameplay-flashes.jsx	22863	78	2348945497		1714670606
-B	complete-user-9x17-16x10-15s-recut.jsx	22942	17	572982181		3000766032
-B	complete-vd057-full-tray-praise.jsx	22960	543	419656411		609270164
-B	configure-native-suction-effects.jsx	23504	235	4143329705		151097282
-B	continuous-hand-press-direction-squares.jsx	23740	36	2404452257		1502213059
-B	correct-matched-game-walls.jsx	23777	138	4209581368		3169106317
-B	create-cartoon-2d-suction-vortex.jsx	23916	96	3873248374		2474847593
-B	create-clean-background-9x16.jsx	24013	76	1836126213		59820738
-B	create-comp-123.jsx	24090	17	575669153		4178512936
-B	create-grow-fx-dual-format.jsx	24108	18	632292301		96661742
-B	create-knife-compress-stretch-9x16.jsx	24127	177	4251985207		13901195
-B	create-loading-bar.jsx	24305	18	623182794		1034715554
-B	create-movie005-native-wide-precomp-and-connect.jsx	24324	179	1336944058		4037435256
-B	create-separated-pickle-vector.jsx	24504	17	567411614		3578714849
-B	create-trampoline-vector.jsx	24522	17	570360739		4001135558
-B	create-two-pickle-taunt-variants.jsx	24540	2334	395962869		1612137695
-B	create-wide-level-comps-with-walls.jsx	26875	17	573113254		2211199888
-B	delete-replaced-vector-hands.jsx	26893	35	2318665609		2157908972
-B	detect-gameplay-wrong-taps.jsx	26929	36	2414741414		199030573
-B	diagnose-black-without-vignette.jsx	26966	132	1328290819		503213641
-B	emphasize-pickle-teasing.jsx	27099	56	1460407264		3288171369
-B	emphasize-play-cta.jsx	27156	36	2412840873		3251008988
-B	enable-vd057-wide-background.jsx	27193	54	1070664564		1877735026
-B	enhance-rwd008-mode-titles-and-voices.jsx	27248	99	366089414		4271196245
-B	enlarge-dash-wide-gameplay-overview.jsx	27348	99	517018873		1689506673
-B	enlarge-vd057-wide-hand-130.jsx	27448	76	1923813392	capture-inspection-frame.jsx	1736662245
-B	ensure-pro-wrong-audio.jsx	27525	154	3867680920		3746925443
-B	expand-bones-source-canvas.jsx	27680	255	512505345		1690515526
-B	export-dash2-timing-template.jsx	27936	17	571147169		2701327953
-B	export-rwd007-clarity-audio.jsx	27954	215	960376142		2149058244
-B	extend-pro-source-canvas.jsx	28170	73	1113264007		430279697
-B	fake-rwd007-clean-final-train-route.jsx	28244	36	2421229479		3695840105
-B	fill-portrait-dash2-pan-edge.jsx	28281	56	1466895330		1096772835
-B	finalize-praise-sfx-trims.jsx	28338	155	155525326		3593176319
-B	finalize-two-pickle-bones-variants.jsx	28494	36	2397505426		2550974556
-B	finalize-vd057-hand-sfx-transfer.jsx	28531	78	2421756018		1543503575
-B	finalize-wide-camera.jsx	28610	56	1478953954		2626825539
-B	find-reference-footage.jsx	28667	16	513540979		3698405501
-B	find-requested-hand-image.jsx	28684	53	880806736		1687523926
-B	finish-15s-user-targets.jsx	28738	137	3547536616		3486865720
-B	finish-ad45-in-9x16.jsx	28876	541	844395076		3122435099
-B	finish-cartoon-lid-blinks.jsx	29418	95	3515946025		3860496968
-B	finish-cartoon-suction-inputs.jsx	29514	158	1817583959		1333037269
-B	finish-centered-reference-legs.jsx	29673	135	2630229124		225562159
-B	finish-comp1-rotating-arrow-blink.jsx	29809	137	3611106551		1660555207
-B	finish-dash-outro-42s-remap.jsx	29947	17	570819483		1716052893
-B	finish-front-hands-cartoon-joints.jsx	29965	217	2293181878		2335309382
-B	finish-knife-compress-stretch-9x16.jsx	30183	863	3658397238		905434000
-B	finish-landscape-15s-user-target.jsx	31047	58	1880689745		3533408960
-B	finish-landscape-edit-via-transfer-comp.jsx	31106	178	692266381		1819745898
-B	finish-landscape-reversed-clips-and-cuts.jsx	31285	153	3276152919		605451565
-B	finish-original-first45-both.jsx	31439	281	2846309145		1523408786
-B	finish-portal-wind-at-12s.jsx	31721	118	3566213363	capture-inspection-frame.jsx	3366957488
-B	finish-portrait-15s-warning.jsx	31840	58	1836256319		3109015642
-B	finish-reference-taunt-captions.jsx	31899	95	3417445409		19060782
-B	finish-reference-tongue-detail.jsx	31995	94	3108574183	capture-inspection-frame.jsx	765490158
-B	finish-rwd007-fast-title-sweep.jsx	32090	196	73869702	capture-inspection-frame.jsx	68603532
-B	finish-square-arm-clearance.jsx	32287	75	1639518194		968682964
-B	finish-square-card-background.jsx	32363	35	2313684865		4200152110
-B	finish-train-head-click-ring.jsx	32399	57	1645480967		1406529702
-B	finish-two-pickle-taunt-variants.jsx	32457	18	624821194		4274144780
-B	finish-wide-comparison.jsx	32476	75	1633226737		3931447566
-B	fit-card-comps-to-shapes.jsx	32552	97	4167111840		3380396528
-B	fit-upper-gate-rectangular-portal.jsx	32650	98	181736653		1759011764
-B	fix-all-background-green-match.jsx	32749	17	566166427		3211591732
-B	fix-bones-mesh-extents.jsx	32767	92	2539983770		3735153581
-B	fix-cohesive-text-outros.jsx	32860	116	2817988753		3823732348
-B	fix-comp1-broken-pixel-edge-fx.jsx	32977	98	200479946		2275957026
-B	fix-comp1-zoom-edge-fill.jsx	33076	56	1465256935		2528887893
-B	fix-current-pro-panel-masks.jsx	33133	76	1885212690		2785446854
-B	fix-duplicated-knife-controller.jsx	33210	57	1659571214		2230498961
-B	fix-easy-continuity-both-15s.jsx	33268	156	963191067		3983120978
-B	fix-game3-border-on-zoom.jsx	33425	57	1631718419		374565908
-B	fix-gate-facing-vortex-perspective.jsx	33483	118	3538426106		3298074793
-B	fix-headline-gradient-coordinates.jsx	33602	54	1090653064		1778023740
-B	fix-landscape-balloon-cut-position.jsx	33657	17	573047702		175037562
-B	fix-landscape-trampoline-contact-keys.jsx	33675	75	1551372235		2494109806
-B	fix-normal-continuity-both-15s.jsx	33751	118	3555596525		3726790453
-B	fix-outro-cta-hierarchy.jsx	33870	36	2406942617		1416515240
-B	fix-pickle-eye-stack.jsx	33907	54	1069484925		2549107060
-B	fix-pickle-lid-white-fringe.jsx	33962	57	1624706054		1817455883
-B	fix-pickle-vector-detail-order.jsx	34020	35	2280130415		603150923
-B	fix-reference-pickle-hip-overlap.jsx	34056	136	3123846310		982586982
-B	fix-rwd007-choice-clicks.jsx	34193	180	2119050754		2745055462
-B	fix-rwd007-click-next-control-before-train-leaves.jsx	34374	239	3249222274		4162491257
-B	fix-rwd007-hand-wait-before-train.jsx	34614	17	565183379		607256265
-B	fix-rwd007-outro-over-level-complete.jsx	34632	76	1944457263		1771678174
-B	fix-rwd007-tap-only-hand.jsx	34709	411	315643644		413107957
-B	fix-rwd007-tap-ring-frame-boundary.jsx	35121	36	2416183204		3392469830
-B	fix-rwd007-visible-click-before-departure.jsx	35158	261	1364932385		3461227692
-B	fix-rwd007-win-dim-full-frame.jsx	35420	36	2417231776		65056312
-B	fix-selector-game3-target.jsx	35457	74	1305415574		2984712442
-B	fix-square-arm-masks.jsx	35532	76	1871450138		2358257747
-B	fix-square-noob-arm.jsx	35609	213	3592039679		2690285098
-B	fix-toy-vortex-rim-perspective.jsx	35823	56	1488194541		1735357345
-B	fix-vd007-wide-background-hold.jsx	35880	17	577504163		669532327
-B	fix-vd057-hand-orange-tiles.jsx	35898	56	1484721132		4221452064
-B	fix-vd057-wide-dim-time.jsx	35955	95	3565360191		2606880349
-B	fix-vd057-wide-hand-follow-gameplay.jsx	36051	57	1675103257		3556871005
-B	fix-vd057-win130-full-dim.jsx	36109	75	1684475885		622318234
-B	fix-wall-level-priority.jsx	36185	56	1429736405		1974669523
-B	fix-wide-background-remap-coverage.jsx	36242	56	1486162929		3206112392
-B	fix-wide-native-background-dash2.jsx	36299	78	2405634162		2884193972
-B	flash-game-frames-on-wrong-taps.jsx	36378	152	2894536766		4227036464
-B	fullhd-cards-click-zoom.jsx	36531	58	1888291925		2297467785
-B	gap-other-versus-dividers.jsx	36590	115	2325616731		1690173702
-B	gap-square-versus-divider.jsx	36706	93	2733380533		99226058
-B	gradient-prove-outro.jsx	36800	76	1833177084		3549151640
-B	hello.jsx	36877	16	507839339		3134838659
-B	hold-final-all-kill.jsx	36894	53	932907877		801030932
-B	hold-rwd007-final-cyan-grid.jsx	36948	56	1439108044		2892844590
-B	import-comp1-composer-my-library-templates.jsx	37005	17	570295199		3921003160
-B	import-rtfx-energy-for-combo-highlights.jsx	37023	36	2386954126		3684809860
-B	improve-rwd007-hand-and-sound-clarity.jsx	37060	141	1149181368		2421191089
-B	inspect-15s-user-targets.jsx	37202	54	1119226774		3206734439
-B	inspect-active-background-contrast.jsx	37257	76	1890193430	capture-inspection-frame.jsx	2341800861
-B	inspect-active-comp.jsx	37334	58	1857817679		4171835288
-B	inspect-active-rwd007-structure.jsx	37393	57	1626278921		3281962598
-B	inspect-ad45-music.jsx	37451	55	1269238702		3385733844
-B	inspect-all-gameplay-hand-targets.jsx	37507	17	576979874		896160447
-B	inspect-all-knife-click-targets.jsx	37525	16	516424565		3885441173
-B	inspect-all-praise-frames.jsx	37542	73	1130106771	capture-inspection-frame.jsx	253811376
-B	inspect-balloon-jump.jsx	37616	56	1436552145		2397273458
-B	inspect-black-flash-sources.jsx	37673	57	1610025986		1331379711
-B	inspect-bones-anchors.jsx	37731	16	517931894		1485187661
-B	inspect-bones-effect-schema.jsx	37748	16	515179379		3996726995
-B	inspect-bones-rig-values.jsx	37765	16	510854002		641288750
-B	inspect-both-reference-camera.jsx	37782	54	1083640705		2424695890
-B	inspect-bridge-install.jsx	37837	94	3172406258		3903831272
-B	inspect-caption-font-weight.jsx	37932	55	1248660386		3642603142
-B	inspect-card-bounds.jsx	37988	55	1299975103		1710882028
-B	inspect-card3-matte.jsx	38044	16	504562531		3042356910
-B	inspect-cartoon-application-state.jsx	38061	16	513147754		214525530
-B	inspect-cartoon-difficulty-comps.jsx	38078	36	2407925661		2835161265
-B	inspect-click-knife-source.jsx	38115	73	1139347312		2843458954
-B	inspect-click06-position.jsx	38189	54	1042090863		3555967986
-B	inspect-combo-assets.jsx	38244	16	511443824		380790955
-B	inspect-combo-plugin-and-voice-trims.jsx	38261	34	2182022993		3832256441
-B	inspect-combo-x8-recolor.jsx	38296	75	1689587697		3807836577
-B	inspect-comp1-arrow-arrival-cue.jsx	38372	54	1120799630		2688763968
-B	inspect-comp1-completion-edge-mask.jsx	38427	55	1285229500		386914547
-B	inspect-comp1-completion-freeze-current.jsx	38483	93	2738623416		97990716
-B	inspect-comp1-continuous-edit-plugins.jsx	38577	54	1130433434		566653922
-B	inspect-comp1-element-vfx-current.jsx	38632	55	1263406007		3846416647
-B	inspect-comp1-element-vfx.jsx	38688	35	2292189044		1343530434
-B	inspect-comp1-footage-keys.jsx	38724	56	1461586903		3178818583
-B	inspect-comp1-missing-yellow-gate.jsx	38781	54	1132465054		190435975
-B	inspect-comp1-outro-source.jsx	38836	93	2815628245		2720921447
-B	inspect-comp1-pixel-border-partial.jsx	38930	16	506463074		2354032037
-B	inspect-comp1-prearrival-partial-remap.jsx	38947	35	2290747242		3964254409
-B	inspect-comp1-smoothzoom-partial.jsx	38983	35	2271414110		2730277857
-B	inspect-comp1-white-glyph-extract.jsx	39019	75	1693061116		1238891529
-B	inspect-composer-template-controls-safe.jsx	39095	132	1603214397		835532100
-B	inspect-composer-template-controls.jsx	39228	16	511181682		4277440503
-B	inspect-cta-typography.jsx	39245	54	1060834162		300484740
-B	inspect-current-card3-border.jsx	39300	17	574948251		1977849641
-B	inspect-current-compression-keys.jsx	39318	16	514524020		1575849633
-B	inspect-current-epic-perfect-rtfx.jsx	39335	94	3170505726		1691968801
-B	inspect-current-level-complete.jsx	39430	36	2420311972		2065560720
-B	inspect-current-player-hand-retime.jsx	39467	36	2404845475		2001812629
-B	inspect-current-pro-frames.jsx	39504	166	2218337080	capture-inspection-frame.jsx	1063572708
-B	inspect-current-red-overlay.jsx	39671	54	1057229687		1060966983
-B	inspect-current-win-stars-sweep.jsx	39726	57	1659440145		1460767478
-B	inspect-dash-black-flashes.jsx	39784	95	3383890960		4208584774
-B	inspect-dash-combo-voices.jsx	39880	114	2127763530		2029707982
-B	inspect-dash-duplicate-short-targets.jsx	39995	97	4098888838		951185697
-B	inspect-dash-wide-background-camera.jsx	40093	92	2531857300		1278459614
-B	inspect-dash-wide-critical-layout.jsx	40186	76	1856114698		2975671518
-B	inspect-dash-wide-order-and-source.jsx	40263	93	2888176602		2752832470
-B	inspect-dash-wide-shape-and-expressions.jsx	40357	17	569705366		742704519
-B	inspect-direction-square-transforms.jsx	40375	92	2628588469		1478273183
-B	inspect-dodge-sound-options.jsx	40468	94	3176993786		4229963889
-B	inspect-easy-15s-continuity.jsx	40563	16	514786162		153883035
-B	inspect-easy-normal-audio-sources.jsx	40580	16	515441524		3392752969
-B	inspect-element-overlay-dependencies.jsx	40597	55	1270942645		1451179806
-B	inspect-first45-rebuild-partial.jsx	40653	56	1488194546		8381781
-B	inspect-flash-source-mapping.jsx	40710	54	1117195147		2096418627
-B	inspect-frozen-arrow.jsx	40765	55	1273629606		2285827313
-B	inspect-game-grass-colors.jsx	40821	54	1127811987		3573153348
-B	inspect-game-selector.jsx	40876	16	512689007		2052472148
-B	inspect-gameplay-error-signals.jsx	40893	53	888015694		2845230546
-B	inspect-gameplay-hand-plan.jsx	40947	17	575275933		3785968595
-B	inspect-gameplay-match-dash2.jsx	40965	17	569181086		2506523116
-B	inspect-gate-cut-and-masks.jsx	40983	157	1174741296	capture-inspection-frame.jsx	1106377592
-B	inspect-gate-train-entry.jsx	41141	192	1291593852	capture-inspection-frame.jsx	2274433908
-B	inspect-hand-original-boundaries.jsx	41334	55	1299319751		2789202591
-B	inspect-hand-press-animation.jsx	41390	56	1466764254		845472564
-B	inspect-hard-danger-layers.jsx	41447	94	3098743781		4063801351
-B	inspect-hard-danger-layout.jsx	41542	96	3795784778		962011001
-B	inspect-hard-danger-targets.jsx	41639	16	519701374		2972051398
-B	inspect-hard-title-position.jsx	41656	56	1455033310		1698775733
-B	inspect-head-caption-contrast.jsx	41713	94	3075675116	capture-inspection-frame.jsx	681865096
-B	inspect-headline-layer-styles.jsx	41808	55	1236470685		135640448
-B	inspect-imported-rtfx-energy.jsx	41864	134	2333416564		435686215
-B	inspect-inner-zoom-light.jsx	41999	16	508429161		627399880
-B	inspect-knife-wall-expressions.jsx	42016	53	865340230		2803476441
-B	inspect-landscape-continuation.jsx	42070	55	1287982017		1930500314
-B	inspect-landscape-jump-keys.jsx	42126	74	1347096495		987930300
-B	inspect-landscape-knife-wall-keys.jsx	42201	54	1065028480		3220331549
-B	inspect-landscape-original-reset.jsx	42256	16	515375984		3656109664
-B	inspect-landscape-resize-state.jsx	42273	55	1303972803		439665573
-B	inspect-level-complete-outro-current-targets.jsx	42329	56	1424821212		450589924
-B	inspect-level-edit-isolation.jsx	42386	16	517210996		772156822
-B	inspect-level-zoom-wide.jsx	42403	16	512099185		962990038
-B	inspect-library-launch.jsx	42420	16	520225652		2214974816
-B	inspect-miss-cue-timing.jsx	42437	57	1697713201	capture-inspection-frame.jsx	964983251
-B	inspect-miss-drip-audio.jsx	42495	16	508822383		4100809116
-B	inspect-miss-swoosh.jsx	42512	17	573506465		1054924498
-B	inspect-miss-vfx-effects.jsx	42530	16	509084517		3064504717
-B	inspect-movie-002-animation-reference.jsx	42547	16	515769199		3501784296
-B	inspect-movie-003.jsx	42564	17	567346071		3751972738
-B	inspect-new-combo-audio.jsx	42582	54	1134103448		2541169756
-B	inspect-opening-master.jsx	42637	55	1203309452		3139809074
-B	inspect-opening-sfx.jsx	42693	54	1066732417		156342670
-B	inspect-other-layouts.jsx	42748	35	2285307761		557417458
-B	inspect-outro-animation.jsx	42784	94	3250066454		16178488
-B	inspect-outro-brand-assets.jsx	42879	55	1302268869		1055154359
-B	inspect-outro-hand-sway.jsx	42935	112	1230051290		1353017111
-B	inspect-outro-layouts.jsx	43048	56	1447365603		4083516766
-B	inspect-outro-remap-partial.jsx	43105	73	1196691353		490663734
-B	inspect-outro-text-style.jsx	43179	55	1296829373		1846509431
-B	inspect-partial-cartoon-art.jsx	43235	54	1089014658		3460386487
-B	inspect-partial-rtfx-combo-state.jsx	43290	55	1244859300		838620762
-B	inspect-partial-wind-state.jsx	43346	96	3870430304		3835528923
-B	inspect-pickle-eye-parts.jsx	43443	17	574227355		1266129351
-B	inspect-pickle-rig-capabilities.jsx	43461	16	509477743		695362639
-B	inspect-pickle-variant-preflight.jsx	43478	16	513016687		4212143661
-B	inspect-player-gameplay-sources.jsx	43495	56	1485507573		2410231262
-B	inspect-portrait-expressions.jsx	43552	55	1202850711		2220798936
-B	inspect-portrait-outro-footage.jsx	43608	16	504431464		4091463924
-B	inspect-praise-audio-preflight.jsx	43625	114	1953830960		658753818
-B	inspect-praise-word-frames.jsx	43740	36	2406680477	capture-inspection-frame.jsx	2745817457
-B	inspect-pro-mask-modes.jsx	43777	55	1291848644		2737799115
-B	inspect-pro-masks.jsx	43833	36	2405894038		463856587
-B	inspect-pro-source-clipping.jsx	43870	74	1327828903		3245747459
-B	inspect-reference-dash2-cues.jsx	43945	55	1303448519		3366178669
-B	inspect-refined-hand-state.jsx	44001	53	875760456		2790420704
-B	inspect-render-options.jsx	44055	35	2293827438		3904736566
-B	inspect-retime-33s.jsx	44091	56	1475939300		3124047680
-B	inspect-retime-content-end.jsx	44148	53	907873116		380422066
-B	inspect-rtfx-selected-assets.jsx	44202	157	1145184550		3339451865
-B	inspect-rwd007-element-cue-times.jsx	44360	157	1204691248		775433512
-B	inspect-rwd007-epic-perfect-text-effects.jsx	44518	153	3231588436		3384191489
-B	inspect-rwd007-final-train-route.jsx	44672	117	3003848857		1069617588
-B	inspect-rwd007-hand-audio-live.jsx	44790	75	1581715418		713618329
-B	inspect-rwd007-hand-element-mix.jsx	44866	136	3019709607		3130019826
-B	inspect-rwd007-hand-praise-title-current.jsx	45003	97	3954512990	capture-inspection-frame.jsx	2309160194
-B	inspect-rwd007-outro-audio.jsx	45101	55	1313344442		839168530
-B	inspect-rwd007-outro-overlap.jsx	45157	76	1888882716		1082873823
-B	inspect-rwd007-route-color-and-sources.jsx	45234	95	3388412950		462694379
-B	inspect-rwd007-source009-mechanic.jsx	45330	39	2842298447	capture-inspection-frame.jsx	4235077638
-B	inspect-rwd007-win-dark-corners.jsx	45370	75	1552945101		3792628314
-B	inspect-rwd007-win-endings.jsx	45446	156	609427709		2862407958
-B	inspect-rwd007-win-hold-layers.jsx	45603	74	1430458298		1775050892
-B	inspect-rwd007-win-style-and-camera.jsx	45678	193	2458265859		3965243982
-B	inspect-rwd008-stage-timing.jsx	45872	57	1681263643		1084530925
-B	inspect-rwd008-voice-mix.jsx	45930	56	1462963183		3988016846
-B	inspect-selected-layer.jsx	45987	96	3879998568		772246703
-B	inspect-selector-layout.jsx	46084	16	503055199		341489659
-B	inspect-selector-now.jsx	46101	16	514655093		941437710
-B	inspect-short-crossing-visibility-opacity.jsx	46118	129	37690233		3798697089
-B	inspect-short-crossing-visibility.jsx	46248	73	1134497678		1058452307
-B	inspect-short-version-comps.jsx	46322	93	2783777728		4172809846
-B	inspect-square-layout.jsx	46416	17	567411617		1747658561
-B	inspect-tap-precomp-readiness.jsx	46434	93	2793542607		595818418
-B	inspect-taunt-caption-partial.jsx	46528	16	514851698		2716652317
-B	inspect-taunt-text-details.jsx	46545	95	3536000051	capture-inspection-frame.jsx	3617824966
-B	inspect-taunt-text-reference.jsx	46641	95	3576960051	capture-inspection-frame.jsx	781739669
-B	inspect-text-fonts-and-layout.jsx	46737	57	1695681575	capture-inspection-frame.jsx	2302145090
-B	inspect-top-wall-clearance.jsx	46795	53	921242470		4097772216
-B	inspect-train-head-sources.jsx	46849	16	519766901		3087655384
-B	inspect-transfer30to58-detail.jsx	46866	96	3795457102		405839388
-B	inspect-transfer30to58.jsx	46963	17	567804825		2806695390
-B	inspect-updated-comp1-and-portrait-sfx.jsx	46981	17	572457880		1781392087
-B	inspect-user-33s-comps.jsx	46999	53	959908724		4166742888
-B	inspect-user-dash-layout-comps.jsx	47053	57	1631325192		461754402
-B	inspect-user-wall-alignment.jsx	47111	54	1126763407		615507467
-B	inspect-variant-face-stack.jsx	47166	56	1490750442		1483545507
-B	inspect-vd007-background-camera.jsx	47223	17	573506459		191275381
-B	inspect-vd007-wide-background.jsx	47241	17	573768609		3889508244
-B	inspect-vd057-background-color.jsx	47259	116	2687309954	capture-inspection-frame.jsx	1609249570
-B	inspect-vd057-destination-tail.jsx	47376	16	514458483		3511871220
-B	inspect-vd057-ending-and-reference.jsx	47393	94	3030127569		3090643083
-B	inspect-vd057-ending-audio-levels.jsx	47488	35	2283931498		1969482646
-B	inspect-vd057-ending-preflight-refresh.jsx	47524	16	513672046		1629155555
-B	inspect-vd057-ending-source-properties.jsx	47541	56	1450249183		7894415
-B	inspect-vd057-full-tray-cues.jsx	47598	275	2990488224	capture-inspection-frame.jsx	103897736
-B	inspect-vd057-landscape-assets.jsx	47874	17	572261281		3454008696
-B	inspect-vd057-landscape-resize.jsx	47892	17	575275939		1074884456
-B	inspect-vd057-live-gameplay-map.jsx	47910	74	1372393403		4046893001
-B	inspect-vd057-portal-sfx.jsx	47985	277	4203035345	capture-inspection-frame.jsx	1082542992
-B	inspect-vd057-praise-partial.jsx	48263	94	3069187053		933137971
-B	inspect-vd057-resize-expressions.jsx	48358	17	572916637		1033154791
-B	inspect-vd057-source-mapping.jsx	48376	95	3506312224		1947650337
-B	inspect-vd057-timing-frames.jsx	48472	92	2506167196		1729336641
-B	inspect-vd057-transfer-applied.jsx	48565	16	514524012		3280870708
-B	inspect-vd057-wide-combo-text.jsx	48582	75	1648627682		2566066560
-B	inspect-vd057-wide-live-check.jsx	48658	17	573047710		2258156434
-B	inspect-vd057-win-live.jsx	48676	35	2305754990		641416492
-B	inspect-wall-sampling-fixed.jsx	48712	54	1109068689		3276689292
-B	inspect-wall-sampling.jsx	48767	54	1091308424		1189092794
-B	inspect-wide-background-alpha.jsx	48822	55	1264323502		272059546
-B	inspect-wide-background-mismatch.jsx	48878	94	3172996102		925548938
-B	inspect-wide-before-first45.jsx	48973	35	2279212916		3363716519
-B	inspect-wide-framing-first45.jsx	49009	16	512820074		1290486318
-B	inspect-wide-hand-render-offset.jsx	49026	56	1490684908		2657329733
-B	inspect-wide-hand-source-chain.jsx	49083	54	1020660586		1668199743
-B	inspect-wide-outro-source.jsx	49138	93	2933789653		3646151716
-B	inspect-wide-resize.jsx	49232	93	2959021030		2894651528
-B	inspect-wind-placement-and-upper-gate.jsx	49326	156	648618221	capture-inspection-frame.jsx	372220320
-B	inspect-wind-separation.jsx	49483	17	570360729		985233275
-B	inspect-wrong-audio.jsx	49501	16	515310450		2224947694
-B	isolate-comp1-arrow-glyph-flash-matte.jsx	49518	56	1513294858		670073397
-B	isolate-level-content-from-zoom-keys.jsx	49575	17	573440928		863780561
-B	keep-player-hand-visible-and-select-direction.jsx	49593	281	3828431784		2272173094
-B	keep-rwd007-hand-visible-through-gameplay.jsx	49875	276	2754427491		4033498876
-B	knife-frame-layout-final.jsx	50152	57	1637682185		260134138
-B	knife-identical-ends-manual-keys.jsx	50210	136	3108510898		357672540
-B	limit-dash-combos-to-filled-tiles-cleanup.jsx	50347	55	1220742050		2756352035
-B	list-bones-effects.jsx	50403	16	513016684		833182815
-B	list-current-element-comps.jsx	50420	16	506790759		1504280428
-B	list-element-plugin-effects.jsx	50437	16	509608806		2714060602
-B	make-wind-suction-and-place-lower-gate.jsx	50454	181	2728863288		3252566364
-B	match-dash2-gameplay-camera-45s.jsx	50636	59	2056260727		3194472355
-B	match-perimeter-grass-to-gameplay.jsx	50696	17	565379997		3021869084
-B	match-pickle-reference-eyes.jsx	50714	99	451941598		2816120465
-B	match-reference-taunt-and-pucker.jsx	50814	339	2260485986		584280899
-B	match-square-versus.jsx	51154	36	2404648853		3333714524
-B	match-vd057-background-to-grass.jsx	51191	156	420552911	capture-inspection-frame.jsx	1132376479
-B	move-dash-outro-to-42s.jsx	51348	482	3276367468		1370411147
-B	mute-vd057-cool-sfx.jsx	51831	114	2098075717		3073851226
-B	open-pickle-eyes-straight-brows.jsx	51946	158	1581719878		3217881216
-B	optimize-wide-level-wall-preview.jsx	52105	16	515310453		299316528
-B	organize-ad45-audio.jsx	52122	55	1255672746		1381176264
-B	orient-wide-hand-at-bottom.jsx	52178	55	1204620174		3481340877
-B	outro-arrow-tap-blue.jsx	52234	74	1345327019		4143767312
-B	outro-white-text-only.jsx	52309	36	2403207070		4042579052
-B	pickle-articulated-ankle-foot-roll.jsx	52346	94	3080328168		4264802759
-B	pickle-attached-leu-leu-tongue.jsx	52441	173	1961305219		114787953
-B	pickle-back-of-hand-view.jsx	52615	171	1050879050		151756640
-B	pickle-continuous-leg-foot-bones.jsx	52787	94	3083801583		779135345
-B	pickle-eyes-look-left-right.jsx	52882	93	2867074007		2084532049
-B	pickle-four-finger-hands.jsx	52976	276	2866887232		3035611728
-B	pickle-goofy-teasing-expression.jsx	53253	140	543497535		2885407353
-B	pickle-hide-extra-fingers-planted-bounce.jsx	53394	95	3391689737		3903042721
-B	pickle-independent-eye-glances.jsx	53490	94	3106477043		2773633380
-B	pickle-left-arm-in-front.jsx	53585	94	3106149367		1209756726
-B	pickle-manic-taunt-flexible-tongue.jsx	53680	98	119674012		899836699
-B	pickle-raised-middle-finger.jsx	53779	273	4131010982		1080961082
-B	pickle-rounded-mouth-pretty-short-tongue.jsx	54053	176	3672122645		2647516557
-B	pickle-seamless-ankle-shafts.jsx	54230	96	3685225526		1206286303
-B	pickle-short-tongue-sway-arms.jsx	54327	135	2731941026		3449682978
-B	pickle-soft-cartoon-lip-motion.jsx	54463	239	2713596503		220521305
-B	pickle-soft-rounded-tongue.jsx	54703	255	24655334		3856561626
-B	pickle-stable-rounded-lips.jsx	54959	255	3783275928		3168790237
-B	place-arrowout-outros.jsx	55215	36	2408515491		1313863611
-B	polish-ad45-timings.jsx	55252	57	1666386960		3128236106
-B	polish-outro-type-spacing.jsx	55310	73	1105399689		3278960827
-B	precompose-tap-cta-zoom.jsx	55384	36	2406352799		4225410595
-B	prepare-active-background-soften.jsx	55421	130	362421151		588178944
-B	prepare-bones-body-rig.jsx	55552	16	514130806		3299687496
-B	prepare-cartoon-transform-effect.jsx	55569	95	3350598676		1262353986
-B	prepare-comp1-arrow-glyph-key.jsx	55665	35	2295203708		2721257403
-B	prepare-comp1-focus-plugin-properties.jsx	55701	36	2414020520		833644668
-B	prepare-comp1-native-element-fx.jsx	55738	17	566625178		1929876625
-B	prepare-comp1-real-edge-matte.jsx	55756	75	1608650717		1365062077
-B	prepare-comp1-requested-plugins.jsx	55832	54	1128598430		817524383
-B	prepare-pickle-motion-reference.jsx	55887	17	569836447		1609644712
-B	prepare-rwd007-win-gameplay-blur.jsx	55905	140	683351417		1775229726
-B	prepare-rwd007-win-native-effects.jsx	56046	116	2757302412		22381686
-B	prepare-selector-reference.jsx	56163	16	503907171		1911009025
-B	prepare-vd057-background-color-match.jsx	56180	75	1653084133		3828337272
-B	prepare-wall-tiling.jsx	56256	55	1234570145		2600207728
-B	preserve-old-selector-layout.jsx	56312	53	909839198		4129737477
-B	preview-blue-arrow-tap.jsx	56366	53	833227560		3267469372
-B	preview-comp1-compact-gate.jsx	56420	34	2149123891		1249856843
-B	preview-grass-easy-color.jsx	56455	54	1095371639		1161852354
-B	preview-grass-hard-color.jsx	56510	54	1094912890		4087183170
-B	preview-portrait-outro.jsx	56565	53	838142766		2262341524
-B	preview-square-outro.jsx	56619	53	835521328		3392377786
-B	preview-synced-wall07.jsx	56673	54	1064569714		944399699
-B	preview-wide-15s-outro.jsx	56728	54	1094323065		1654422865
-B	preview-wide-gameplay.jsx	56783	34	2173372227		2972276330
-B	preview-wide-outro.jsx	56818	53	836242225		2369885006
-B	raise-hard-title.jsx	56872	56	1458441196		1450889855
-B	read-active-background-soften-schema.jsx	56929	95	3392541726		1429469504
-B	read-arrow-key-effect-names.jsx	57025	16	508625771		900305883
-B	read-comp1-arrow-key-properties.jsx	57042	56	1437535196		440077162
-B	read-comp1-focus-plugin-properties.jsx	57099	152	2905153610		3504582070
-B	read-gameplay-background-fill-base.jsx	57252	16	516293499		2756113715
-B	read-gameplay-background-fill.jsx	57269	74	1501368281		2978801918
-B	read-library-connection-check.jsx	57344	16	506528609		1221223564
-B	read-rwd007-fast-title-partial.jsx	57361	57	1682639895		381775756
-B	read-rwd007-hand-mapping.jsx	57419	17	568066966		1016016325
-B	read-rwd007-source-mapping.jsx	57437	16	508494694		899194621
-B	rebalance-square-layout.jsx	57454	98	153162933		2170071951
-B	rebuild-dash-original-first45-both.jsx	57553	498	2916313393		2234493134
-B	recheck-current-pro-errors.jsx	58052	74	1393561536		1276560071
-B	recover-separate-gate-wind-precomps.jsx	58127	18	629605312	capture-inspection-frame.jsx	1557343943
-B	recut-ad45-to-axel-beats.jsx	58146	138	4049607997		692551818
-B	recut-dash-duplicate-two-formats-to-15s.jsx	58285	18	626918341		1040700733
-B	recut-updated-comp1-pixel-borders-natural-sfx.jsx	58304	461	2758303992		798279858
-B	recut-user-9x17-16x10-to-15s.jsx	58766	244	3340579781		2265793361
-B	reference-style-outros.jsx	59011	17	568001439		3754877977
-B	refine-bones-raised-arm-rest.jsx	59029	97	3968406612		3393114435
-B	refine-click-before-measured-coil.jsx	59127	94	3140686847		820496717
-B	refine-comp1-white-only-arrow-glyph.jsx	59222	16	512164728		1294040852
-B	refine-current-praise-errors.jsx	59239	113	1557927922	capture-inspection-frame.jsx	3245454027
-B	refine-current-remaining.jsx	59353	35	2286946169	capture-inspection-frame.jsx	2092745609
-B	refine-direction-square-press-timing.jsx	59389	153	3493142654		455769964
-B	refine-first45-prearrival-hand.jsx	59543	218	2879270379		897371995
-B	refine-landscape-miss-anchors.jsx	59762	74	1373114297		2403078765
-B	refine-portrait-labels.jsx	59837	76	1953501227		864356093
-B	refine-praise-onsets.jsx	59914	153	3537576075	capture-inspection-frame.jsx	147956678
-B	refine-reference-knee-bends.jsx	60068	172	1708008587		633853670
-B	refine-reference-plump-soft-tongue.jsx	60241	218	2518035881		2387612713
-B	refine-rtfx-epic-impact.jsx	60460	58	1796017192		3777038017
-B	refine-rwd007-cartoon-title-stars-shared-sweep.jsx	60519	37	2539718602		3950304910
-B	refine-rwd007-choice-lead.jsx	60557	154	3746111618		736692147
-B	refine-rwd007-clean-route-seams.jsx	60712	59	2032209009		940090872
-B	refine-rwd007-fast-title-transition.jsx	60772	214	296758589	capture-inspection-frame.jsx	3850305649
-B	refine-rwd007-sequential-retained-words.jsx	60987	296	2278178533		3333997312
-B	refine-rwd007-single-word-popups.jsx	61284	256	1004680746		710316153
-B	refine-rwd007-win-to-game-popup.jsx	61541	179	1350444481		578793925
-B	refine-rwd007-word-by-word-win.jsx	61721	287	521092225		3971681167
-B	refine-square-hand-wait.jsx	62009	56	1495141367		1228381508
-B	refine-vd057-wide-background.jsx	62066	54	1099369353		1948759870
-B	refine-wall-flash-sampling.jsx	62121	17	573506459		3089209630
-B	rekey-current-player-hand-to-real-squares.jsx	62139	1151	3603297047		3845948034
-B	rekey-rigid-landscape-wall-contacts.jsx	63291	56	1449266144		3862315751
-B	rekey-wide-player-hand-to-real-squares.jsx	63348	17	564462483		3442149188
-B	remove-arrowout-entrance.jsx	63366	36	2411726759		280966530
-B	remove-dash-win-card.jsx	63403	97	4114945170		3778633581
-B	remove-gameplay-top-level-labels.jsx	63501	16	517735285		4251482791
-B	remove-rwd007-selection-sfx.jsx	63518	77	2167935053		1241674213
-B	render-ad45-audio.jsx	63596	171	978461770		1517099558
-B	render-ad45-review.jsx	63768	57	1642335247		4000064026
-B	repair-bones-source-canvas.jsx	63826	217	2954243589		4051891638
-B	replace-comp1-drawn-strokes-with-pixel-borders.jsx	64044	297	2289843881		292633209
-B	replace-landscape-outro-fixed.jsx	64342	55	1277954990		3031903002
-B	replace-level-walls-with-user-images.jsx	64398	97	4099937403		1532876338
-B	replace-pickle-blink-with-lids.jsx	64496	190	712190093		3620854423
-B	resize-9x17-to-16x9.jsx	64687	97	4208465032		2325414678
-B	resize-current-portrait-to-wide-size.jsx	64785	56	1392774087		204816557
-B	resize-user-dash-16x9-from-portrait.jsx	64842	18	629670857		4000519259
-B	resize-vd057-portrait-into-landscape.jsx	64861	18	632619992		2052108963
-B	restore-9x16-portrait-dimensions.jsx	64880	17	567739289		3217604326
-B	restore-classic-element-overlays45.jsx	64898	115	2173704255		1507382746
-B	restore-crazyfrog-music-mix.jsx	65014	57	1662323733		2012807823
-B	restore-cropped-card-anchors.jsx	65072	56	1496386550		2557739726
-B	restore-miss-caption-style.jsx	65129	133	1758534697		3376599925
-B	restore-natural-easy-normal-sfx-15s.jsx	65263	17	567477139		4075297396
-B	restore-pro-panel-alignment.jsx	65281	76	1885999114		1587902612
-B	restore-vd057-cool-sfx.jsx	65358	317	4223288168		1328273605
-B	retime-dash-to-45s.jsx	65676	96	3700823111		4221004172
-B	retime-rwd007-to30s.jsx	65773	36	2401240988		746679855
-B	reverse-selector-right-to-left.jsx	65810	35	2300577654		1681817286
-B	rig-pickle-bones-smooth-cartoon.jsx	65846	221	992423551		1915657787
-B	rig-two-pickle-variants-with-bones.jsx	66068	199	1802840556		511964910
-B	round-pickle-taunt-hands.jsx	66268	393	15749888		2797107562
-B	sample-all-choice-squares.jsx	66662	96	3807777883		614747699
-B	sample-direction-square-arrival-targets.jsx	66759	212	3022138574		1388621014
-B	sample-outline-square-projection.jsx	66972	193	2468423924		2072380821
-B	selector-front-before-spin.jsx	67166	97	4073067649		901065227
-B	separate-cartoon-eye-lids.jsx	67264	77	2191069263		3483671319
-B	separate-gate-wind-precomps.jsx	67342	503	214461055	capture-inspection-frame.jsx	543710044
-B	separate-pickle-eye-rig.jsx	67846	17	573178786		2328838859
-B	separate-reference-leg-positions.jsx	67864	159	2312839558		2866959441
-B	set-ad45-master-audio-gain.jsx	68024	53	908856145		337513294
-B	set-rwd007-music-minus10.jsx	68078	78	2438271099		2199884485
-B	shorten-hard-flash-add-danger-sfx.jsx	68157	96	3845919851		1092230430
-B	show-bridge-connection-status.jsx	68254	16	511181674	Codex Bridge.jsx	2653659132
-B	show-click-before-knife-compress.jsx	68271	253	3281925572		3820810485
-B	show-current-player-hand-click-proof.jsx	68525	16	502924134		2270543506
-B	show-front-card3.jsx	68542	16	505152361		405586661
-B	show-rwd007-fixed-choice.jsx	68559	153	3632930959		3658334452
-B	show-wide-player-hand-click-proof.jsx	68713	90	1716392703		1056030455
-B	single-red-error-cues.jsx	68804	112	1143740344		2354826801
-B	smaller-portrait-labels.jsx	68917	55	1178798978		676138842
-B	soft-red-gameplay-flashes.jsx	68973	230	386412739		3295061589
-B	split-portal-wind-two-gate-comps.jsx	69204	436	4232404046		1635102020
-B	square-game-safe-margin.jsx	69641	58	1824459824		727283613
-B	stabilize-pickle-bones-shapes.jsx	69700	144	2527338015		2608499922
-B	start-carousel-on-screen1.jsx	69845	155	310517997		4088153060
-B	style-other-comparisons.jsx	70001	100	833492263		4028313385
-B	style-square-comparison.jsx	70102	17	564921236		4098735472
-B	sync-all-hand-knife-clicks.jsx	70120	99	549590274		3944159041
-B	sync-dash-wide-background-to-gameplay-camera.jsx	70220	100	825103642		3710758215
-B	sync-level-wall-zoom-and-video-light.jsx	70321	57	1602358261		4219146807
-B	sync-new-pro-combo-sfx.jsx	70379	75	1588465613		3763423566
-B	thicken-iq-caption-strokes.jsx	70455	55	1286605746		3041915316
-B	thicken-you-cant-hit-me-strokes.jsx	70511	132	1585060925		3759794954
-B	tone-match-generated-walls.jsx	70644	55	1242041251		2284620053
-B	update-background-lavender.jsx	70700	95	3473413164		1114875510
-B	update-background-warm-beige.jsx	70796	191	986785920		3893269987
-B	update-codex-bridge-panel.jsx	70988	17	568263580	Codex Bridge.jsx	2245940101
-B	update-current-gameplay-cues.jsx	71006	76	1890652184		4281427208
-B	use-requested-gameplay-hand-image.jsx	71083	97	4175697054		2852182838
-B	validate-final-pickle-bones-lids.jsx	71181	57	1633946635		2818444961
-B	verify-all-eight-gameplay-hands.jsx	71239	115	2476546172		1072328458
-B	verify-all-hand-knife-clicks.jsx	71355	16	511705968		3113259331
-B	verify-and-capture-iw-difficulty-text.jsx	71372	17	572851106		922369709
-B	verify-and-capture-train-head-clicks.jsx	71390	216	2171612644		385010992
-B	verify-capture-ad45.jsx	71607	94	3146388477	capture-inspection-frame.jsx	1427945179
-B	verify-capture-cartoon-2d-vortex.jsx	71702	76	1860636681	capture-inspection-frame.jsx	3841434641
-B	verify-capture-rwd007-3d-win.jsx	71779	157	1203577143		3933455919
-B	verify-capture-rwd007-cartoon-title-stars.jsx	71937	223	2966105885	capture-inspection-frame.jsx	1168804548
-B	verify-capture-rwd007-clean-final-route.jsx	72161	77	2167672901	capture-inspection-frame.jsx	56872972
-B	verify-capture-rwd007-early-hand-asmr.jsx	72239	97	4068414579	capture-inspection-frame.jsx	2829325238
-B	verify-capture-rwd007-full-frame-dim.jsx	72337	229	3423219813	capture-inspection-frame.jsx	1343162943
-B	verify-capture-rwd007-hand-clarity.jsx	72567	195	3815123295		3682907432
-B	verify-capture-rwd007-hand-color-fast-title.jsx	72763	190	4200015878	capture-inspection-frame.jsx	4070214606
-B	verify-capture-rwd007-outro-overlap.jsx	72954	258	3873650422	capture-inspection-frame.jsx	893841218
-B	verify-capture-rwd007-perfect-cool.jsx	73213	58	1829178426	capture-inspection-frame.jsx	4278954780
-B	verify-capture-rwd007-win-popup.jsx	73272	294	3628875290		1754533038
-B	verify-capture-rwd008-mode-enhancement.jsx	73567	154	3767804045		3849383847
-B	verify-capture-toy-vortex-30s.jsx	73722	197	1007954395	capture-inspection-frame.jsx	970115802
-B	verify-capture-vd057-level-outro.jsx	73920	133	2088115279	capture-inspection-frame.jsx	3537654157
-B	verify-cartoon-combos-and-sfx.jsx	74054	115	2257066059		3369193963
-B	verify-classic-elements45.jsx	74170	116	2643925119		1309567018
-B	verify-cohesive-outros.jsx	74287	111	937695165	capture-inspection-frame.jsx	1114084071
-B	verify-combo-x8-green.jsx	74399	156	790503695	capture-inspection-frame.jsx	659332619
-B	verify-complete-square-crossings.jsx	74556	308	2190557540		4291374167
-B	verify-crossing-offscreen-detail.jsx	74865	348	1712540124		3716240742
-B	verify-current-portrait-resized-wide.jsx	75214	17	569508761		1990871249
-B	verify-current-pro-cues.jsx	75232	118	3540982002	capture-inspection-frame.jsx	3296002962
-B	verify-dash-45s-filled-combos.jsx	75351	177	249308526		2271738830
-B	verify-dash-combo-win.jsx	75529	116	2769557655		2886815259
-B	verify-dash2-match45.jsx	75646	75	1596854242		972047655
-B	verify-deep-cartoon-suction.jsx	75722	178	981411252	capture-inspection-frame.jsx	3106729401
-B	verify-direction-square-hands.jsx	75901	114	2018121775		944157703
-B	verify-export-rwd007-audio-mix.jsx	76016	154	3756662912		826292295
-B	verify-final-train-head-taps.jsx	76171	135	2545163375		649457011
-B	verify-final-user-15s-edits.jsx	76307	17	564986764		2004425081
-B	verify-four-comps-33s.jsx	76325	36	2407335839		2520991672
-B	verify-game-selector-5s.jsx	76362	16	512689009		450250914
-B	verify-gameplay-hand-state.jsx	76379	36	2440890288		2440415423
-B	verify-head-caption-contrast.jsx	76416	16	515375982		2157473906
-B	verify-knife-compression-poses.jsx	76433	96	3770356807	capture-inspection-frame.jsx	1605593431
-B	verify-landscape-adaptation.jsx	76530	152	2817269810	capture-inspection-frame.jsx	3212766898
-B	verify-loading-bar.jsx	76683	60	2267352236		46977902
-B	verify-manic-pickle-cycle.jsx	76744	130	516365235	capture-inspection-frame.jsx	547310542
-B	verify-natural-15s-sfx.jsx	76875	16	511443816		2066415094
-B	verify-original-first45-both.jsx	76892	116	2677872766		1470615673
-B	verify-outlined-small-hands-technical.jsx	77009	289	3112189249		980364104
-B	verify-outlined-small-hands.jsx	77299	234	3364827537		3354674487
-B	verify-pickle-animation-10s.jsx	77534	113	1643059208	capture-inspection-frame.jsx	4004989726
-B	verify-pickle-bones-eyelids.jsx	77648	55	1284508608	capture-inspection-frame.jsx	4088878131
-B	verify-pickle-lids.jsx	77704	16	513409907		1021398189
-B	verify-player-hand-rekey-real-gameplay.jsx	77721	451	1986027386		3004612537
-B	verify-portal-closing-light.jsx	78173	58	1855720516	capture-inspection-frame.jsx	764821087
-B	verify-portal-wind-12s-readonly.jsx	78232	278	496122575	capture-inspection-frame.jsx	2993624362
-B	verify-prearrival-square-presses.jsx	78511	372	2309377737		2819210605
-B	verify-reference-outros.jsx	78884	95	3381728290		2174423256
-B	verify-reference-pickle-hip-overlap.jsx	78980	135	2662866054	capture-inspection-frame.jsx	3467745677
-B	verify-reference-tongue-detail.jsx	79116	55	1261177773	capture-inspection-frame.jsx	1382252672
-B	verify-requested-gameplay-hand-image.jsx	79172	211	2564369588		626016882
-B	verify-rigid-wall-blades.jsx	79384	75	1604915160	capture-inspection-frame.jsx	722918371
-B	verify-rwd007-30s.jsx	79460	74	1308299169		1818678454
-B	verify-rwd007-choice-clicks.jsx	79535	312	2324120098		2588517477
-B	verify-rwd007-continuous-hand.jsx	79848	157	1255743796	capture-inspection-frame.jsx	2770137766
-B	verify-rwd007-element-sfx-library.jsx	80006	194	3079678232		1212790496
-B	verify-rwd007-hand-wait-before-train.jsx	80201	276	3138927227	capture-inspection-frame.jsx	2763271221
-B	verify-rwd007-next-control-before-train.jsx	80478	531	874803356	capture-inspection-frame.jsx	2591877582
-B	verify-rwd007-tap-only-hand.jsx	81010	430	3593493280	capture-inspection-frame.jsx	781112506
-B	verify-rwd007-visible-physical-click.jsx	81441	36	2411792285	capture-inspection-frame.jsx	823103269
-B	verify-rwd008-difficulty-voices.jsx	81478	115	2293766225		3862543235
-B	verify-short-miss-edits.jsx	81594	35	2302936957	capture-inspection-frame.jsx	249482532
-B	verify-square-hand-technical.jsx	81630	57	1627655170		3049319267
-B	verify-square-layout.jsx	81688	55	1260653485		2690505847
-B	verify-taunt-caption-frames.jsx	81744	93	2877952984	capture-inspection-frame.jsx	520358264
-B	verify-two-pickle-taunt-variants.jsx	81838	116	2646677624	capture-inspection-frame.jsx	3630259769
-B	verify-two-portal-wind-comps.jsx	81955	78	2381451368	capture-inspection-frame.jsx	187576880
-B	verify-vd057-full-tray-praise.jsx	82034	55	1256197039	capture-inspection-frame.jsx	3911088983
-B	verify-vd057-landscape-resize.jsx	82090	136	3477937433	capture-inspection-frame.jsx	61856140
-B	verify-vd057-portal-sfx.jsx	82227	112	1244731346		2465603251
-B	verify-vd057-wide-hand-follow.jsx	82340	154	4164100274	capture-inspection-frame.jsx	4222361118
-B	verify-vd057-wide-hand-scale130.jsx	82495	53	897518410	capture-inspection-frame.jsx	2349291751
-B	verify-wall-and-trampoline-constraints.jsx	82549	56	1427049418		795072106
-B	verify-wall-light-sync.jsx	82606	56	1403653058		3421107343
-B	verify-wide-native-background-dash2.jsx	82663	17	575865764		2535084983
-B	verify-wide-player-hand-rekey.jsx	82681	57	1660226574		2260259220
-B	vertical-wide-versus-divider.jsx	82739	134	1952259105		2840552629
-B	view-comparison-16x9.jsx	82874	16	509543273		1182761432
-B	view-comparison-9x16.jsx	82891	92	2439975806		1193902552
-B	view-comparison-square.jsx	82984	92	2441548663		1326809436
-B	view-wrong-tap-example.jsx	83077	53	841288497		2848955765
-M	m00001	83131	27279	3826941258
-M	m00002	110411	21236	1806244259
-M	m00003	131648	16221	1187898478
-M	m00004	147870	575	3751786686
-M	m00005	148446	7	109379951
-M	m00006	148454	79	289282516
-M	m00007	148534	143	183642438
-M	m00008	148678	424	304645086
-M	m00009	149103	161	1278620547
-M	m00010	149265	15	410190598
-M	m00011	149281	8	135397775
-M	m00012	149290	46	1216351746
-M	m00013	149337	14	427361078
-M	m00014	149352	10	218628714
-M	m00015	149363	62	2782729310
-M	m00016	149426	14	359662308
-M	m00017	149441	206	2856731311
-M	m00018	149648	42	3988065045
-M	m00019	149691	9	163512751
-M	m00020	149701	297	1334532899
-M	m00021	149999	12	260440591
-M	m00022	150012	16	480576374
-M	m00023	150029	345	983262635
-M	m00024	150375	133	1912545230
-M	m00025	150509	15	376242799
-M	m00026	150525	23	884278358
-M	m00027	150549	93	3169524197
-M	m00028	150643	37	2643069158
-M	m00029	150681	192	1623471400
-M	m00030	150874	227	155403640
-M	m00031	151102	113	995565350
-M	m00032	151216	142	2165647218
-M	m00033	151359	41	3591244546
-M	m00034	151401	16	419037839
-M	m00035	151418	4	43909391
-M	m00036	151423	14	335544911
-M	m00037	151438	99	2667650388
-M	m00038	151538	187	1344811283
-M	m00039	151726	18	536281959
-M	m00040	151745	57	2905607801
-M	m00041	151803	106	4081720958
-M	m00042	151910	19	666960854
-M	m00043	151930	18	629671003
-M	m00044	151949	13	307823234
-M	m00045	151963	90	3076135115
-M	m00046	152054	10	193724879
-M	m00047	152065	105	1063854842
-M	m00048	152171	17	537002965
-M	m00049	152189	5	63635759
-M	m00050	152195	218	3461105831
-M	m00051	152414	46	1882394510
-M	m00052	152461	14512	1400770555
-M	m00053	166974	13608	1449110689
-M	m00054	180583	13312	3923836557
-M	m00055	193896	1897	626101770
-M	m00056	195794	11054	1878091662
-M	m00057	206849	13004	2566356593
-M	m00058	219854	12665	2366647447
-M	m00059	232520	1876	4034816787
-M	m00060	234397	10374	3729700803
-M	m00061	244772	54	3294630006
-M	m00062	244827	12577	2232780128
-M	m00063	257405	5960	1710356617
-M	m00064	263366	6136	3867422406
-M	m00065	269503	12253	2701745583
-M	m00066	281757	12035	595189563
-M	m00067	293793	86	302587438
-M	m00068	293880	3367	2836948441
-M	m00069	297248	8382	3791471865
-M	m00070	305631	2036	3906116163
-M	m00071	307668	3953	82445259
-M	m00072	311622	5025	2539950246
-M	m00073	316648	11191	986007333
-M	m00074	327840	319	3702746668
-M	m00075	328160	103	1569005846
-M	m00076	328264	571	2377164103
-M	m00077	328836	2574	92040222
-M	m00078	331411	29	2521500179
-M	m00079	331441	17	525075327
-M	m00080	331459	20	1232602849
-M	m00081	331480	1759	1543571766
-M	m00082	333240	65	3120108958
-M	m00083	333306	4168	2952167190
-M	m00084	337475	11226	2986402328
-M	m00085	348702	11101	2876808026
-M	m00086	359804	34	3510701047
-M	m00087	359839	121	3664849356
-M	m00088	359961	1118	259677917
-M	m00089	361080	70	3653965053
-M	m00090	361151	3701	3117348343
-M	m00091	364853	5325	3916079222
-M	m00092	370179	105	1184506296
-M	m00093	370285	100	2791644583
-M	m00094	370386	373	3748234139
-M	m00095	370760	116	2280270102
-M	m00096	370877	6	108528093
-M	m00097	370884	71	2101156086
-M	m00098	370956	975	930758301
-M	m00099	371932	227	696405704
-M	m00100	372160	174	2879274585
-M	m00101	372335	4271	457663125
-M	m00102	376607	1062	692281819
-M	m00103	377670	606	2367732468
-M	m00104	378277	1539	410848251
-M	m00105	379817	7	147980842
-M	m00106	379825	1321	2912997109
-M	m00107	381147	2267	2042627824
-M	m00108	383415	377	3384246694
-M	m00109	383793	20	1181288004
-M	m00110	383814	137	3476826416
-M	m00111	383952	1671	1181170853
-M	m00112	385624	3054	2904745647
-M	m00113	388679	108	1001596579
-M	m00114	388788	136	4269027582
-M	m00115	388925	1194	2911540362
-M	m00116	390120	172	125647683
-M	m00117	390293	22	1603078127
-M	m00118	390316	2437	4225317675
-M	m00119	392754	849	158733120
-M	m00120	393604	68	3961263532
-M	m00121	393673	12	248447557
-M	m00122	393686	1029	1530019
-M	m00123	394716	11	375849907
-M	m00124	394728	1895	4043723403
-M	m00125	396624	1748	3200862093
-M	m00126	398373	207	2910078066
-M	m00127	398581	410	440241534
-M	m00128	398992	2468	2097277043
-M	m00129	401461	1408	1543083404
-M	m00130	402870	141	4005242980
-M	m00131	403012	198	2800432886
-M	m00132	403211	146	1056188323
-M	m00133	403358	1938	2269996896
-M	m00134	405297	76	4147190635
-M	m00135	405374	1687	1947406758
-M	m00136	407062	268	3370997648
-M	m00137	407331	712	1535109330
-M	m00138	408044	6069	3769362390
-M	m00139	414114	76	676730586
-M	m00140	414191	634	1077140026
-M	m00141	414826	7633	916647627
-M	m00142	422460	31	3105688357
-M	m00143	422492	733	3026647643
-M	m00144	423226	1575	2063605616
-M	m00145	424802	545	1293657647
-M	m00146	425348	1761	495206863
-M	m00147	427110	981	3046713881
-M	m00148	428092	216	48645468
-M	m00149	428309	2076	2771625912
-M	m00150	430386	519	1433384162
-M	m00151	430906	202	1518618589
-M	m00152	431109	42	1346637706
-M	m00153	431152	6	109707743
-M	m00154	431159	1916	2720439758
-M	m00155	433076	41	902434384
-M	m00156	433118	445	3872170665
-M	m00157	433564	101	3040813279
-M	m00158	433666	1117	1687130352
-M	m00159	434784	232	324752476
-M	m00160	435017	4	45678869
-M	m00161	435022	646	3784427791
-M	m00162	435669	553	4149785751
-M	m00163	436223	681	3063150712
-M	m00164	436905	1379	270851883
-M	m00165	438285	38	83299730
-M	m00166	438324	2668	4136266144
-M	m00167	440993	3999	3915537690
-M	m00168	444993	170	497237843
-M	m00169	445164	8708	1224358219
-M	m00170	453873	589	1079496866
-M	m00171	454463	5	68616546
-M	m00172	454469	131	494874310
-M	m00173	454601	63	2771326379
-M	m00174	454665	1662	1713450588
-M	m00175	456328	398	3390670281
-M	m00176	456727	165	2215327473
-M	m00177	456893	147	1303784594
-M	m00178	457041	1037	1922062334
-M	m00179	458079	597	1635631853
-M	m00180	458677	1381	1220658556
-M	m00181	460059	303	935618298
-M	m00182	460363	1509	2908946327
-M	m00183	461873	6672	1939546970
-M	m00184	468546	862	3653574692
-M	m00185	469409	187	2563852183
-M	m00186	469597	70	2261784908
-M	m00187	469668	106	2862097628
-M	m00188	469775	12	422839305
-M	m00189	469788	6	105972143
-M	m00190	469795	889	1510753021
-M	m00191	470685	734	1754526856
-M	m00192	471420	495	577218340
-M	m00193	471916	206	6570320
-M	m00194	472123	2955	1973301045
-M	m00195	475079	102	2218336638
-M	m00196	475182	257	3647295793
-M	m00197	475440	31	3171814383
-M	m00198	475472	84	2134186607
-M	m00199	475557	97	2616400945
-M	m00200	475655	1987	3298927945
-M	m00201	477643	90	2246123192
-M	m00202	477734	201	2408531697
-M	m00203	477936	13	432735211
-M	m00204	477950	25	1943210239
-M	m00205	477976	287	1684825506
-M	m00206	478264	7	120062435
-M	m00207	478272	3	23789749
-M	m00208	478276	288	3986385111
-M	m00209	478565	674	4238403121
-M	m00210	479240	1105	2183487861
-M	m00211	480346	7	132252131
-M	m00212	480354	11	393610184
-M	m00213	480366	1530	2427381551
-M	m00214	481897	8270	1875413822
-M	m00215	490168	8246	573097713
-M	m00216	498415	1339	639946981
-M	m00217	499755	3893	3507482892
-M	m00218	503649	1429	4287814844
-M	m00219	505079	1152	3105982856
-M	m00220	506232	666	1712383978
-M	m00221	506899	10	308872024
-M	m00222	506910	409	1355710524
-M	m00223	507320	540	1380820183
-M	m00224	507861	960	657861280
-M	m00225	508822	9	226362047
-M	m00226	508832	247	2841596877
-M	m00227	509080	610	822723409
-M	m00228	509691	3376	3450232125
-M	m00229	513068	4907	55081658
-M	m00230	517976	3548	125926545
-M	m00231	521525	1655	2743487515
-M	m00232	523181	4	48169254
-M	m00233	523186	2350	1739199479
-M	m00234	525537	631	1946404766
-M	m00235	526169	2715	319304044
-M	m00236	528885	318	1002661653
-M	m00237	529204	3308	3348066527
-M	m00238	532513	3817	1131814568
-M	m00239	536331	2523	3913557929
-M	m00240	538855	5312	347576146
-M	m00241	544168	227	3224848513
-M	m00242	544396	7252	5818865
-M	m00243	551649	146	2471572346
-M	m00244	551796	12	480838773
-M	m00245	551809	118	3724749176
-M	m00246	551928	13	521864272
-M	m00247	551942	6	108986846
-M	m00248	551949	51	3277590923
-M	m00249	552001	18	966526491
-M	m00250	552020	100	994583678
-M	m00251	552121	128	2968661458
-M	m00252	552250	269	1771330372
-M	m00253	552520	82	3593411856
-M	m00254	552603	17	846529951
-M	m00255	552621	39	4062645319
-M	m00256	552661	17	904005051
-M	m00257	552679	170	2180464029
-M	m00258	552850	164	2587768996
-M	m00259	553015	385	1170245342
-M	m00260	553401	431	2626853083
-M	m00261	553833	270	2245091178
-M	m00262	554104	14	550306945
-M	m00263	554119	6	97649068
-M	m00264	554126	11	344523642
-M	m00265	554138	10	280953628
-M	m00266	554149	15	664798476
-M	m00267	554165	8	180028022
-M	m00268	554174	7	133497348
-M	m00269	554182	17	781059366
-M	m00270	554200	287	3346623133
-M	m00271	554488	1542	861332016
-M	m00272	556031	100	3496813201
-M	m00273	556132	5137	419809710
-M	m00274	561270	731	319747508
-M	m00275	562002	959	330120841
-M	m00276	562962	38	4132441346
-M	m00277	563001	605	4206156230
-M	m00278	563607	292	2453365973
-M	m00279	563900	99	3133678127
-M	m00280	564000	148	3347853959
-M	m00281	564149	3061	1493615734
-M	m00282	567211	1598	2132946582
-M	m00283	568810	7699	119854484
-M	m00284	576510	21	1248855712
-M	m00285	576532	3583	1536611429
-M	m00286	580116	439	1190366709
-M	m00287	580556	272	320888691
-M	m00288	580829	247	2300989415
-M	m00289	581077	1480	772602905
-M	m00290	582558	521	3108289470
-M	m00291	583080	223	1002915704
-M	m00292	583304	745	1891755449
-M	m00293	584050	364	219179629
-M	m00294	584415	2008	1941138160
-M	m00295	586424	3570	4259990205
-M	m00296	589995	4338	742052269
-M	m00297	594334	2861	1335278964
-M	m00298	597196	17	968296011
-M	m00299	597214	24	1746733075
-M	m00300	597239	3	16842880
-M	m00301	597243	5	78971276
-M	m00302	597249	8	173474356
-M	m00303	597258	54	1175981113
-M	m00304	597313	97	494280457
-M	m00305	597411	145	3896781210
-M	m00306	597557	93	3878493217
-M	m00307	597651	114	2849644559
-M	m00308	597766	6	110232032
-M	m00309	597773	19	1067255391
-M	m00310	597793	21	1461913523
-M	m00311	597815	59	2791052976
-M	m00312	597875	24	1839925289
-M	m00313	597900	81	1565661668
-M	m00314	597982	130	1008283334
-M	m00315	598113	270	657874712
-M	m00316	598384	434	1969068350
-M	m00317	598819	965	4225652048
-M	m00318	599785	4885	1112122401
-M	m00319	604671	178	1318796826
-M	m00320	604850	7262	4137734245
-M	m00321	612113	27	2213874016
-M	m00322	612141	96	2011439789
-M	m00323	612238	215	1023167517
-M	m00324	612454	7084	2150029147
-M	m00325	619539	44	1138364003
-M	m00326	619584	402	2614069957
-M	m00327	619987	5367	1208346455
-M	m00328	625355	82	2653166699
-M	m00329	625438	568	2114439008
-M	m00330	626007	4035	2292215179
-M	m00331	630043	2645	1459071323
-M	m00332	632689	6354	4282285135
-M	m00333	639044	8	137822641
-M	m00334	639053	58	1651446973
-M	m00335	639112	6641	3212656226
-M	m00336	645754	524	3664026682
-M	m00337	646279	33	3157068497
-M	m00338	646313	1695	4090968316
-M	m00339	648009	3644	1289611000
-M	m00340	651654	224	2976730694
-M	m00341	651879	585	2935736906
-M	m00342	652465	349	2457237262
-M	m00343	652815	593	301712865
-M	m00344	653409	3099	3587551900
-M	m00345	656509	967	2151429966
-M	m00346	657477	118	2058496090
-M	m00347	657596	631	2437341108
-M	m00348	658228	5	66519356
-M	m00349	658234	116	168699770
-M	m00350	658351	4959	2976549125
-M	m00351	663311	6589	1337551890
-M	m00352	669901	6397	1958978552
-M	m00353	676299	1812	3255269748
-M	m00354	678112	89	4277804282
-M	m00355	678202	609	889117870
-M	m00356	678812	3429	1244957875
-M	m00357	682242	87	433462882
-M	m00358	682330	1203	3434383450
-M	m00359	683534	8	144441907
-M	m00360	683543	8	190775903
-M	m00361	683552	30	2841053935
-M	m00362	683583	34	3858173083
-M	m00363	683618	31	2067466398
-M	m00364	683650	329	189557839
-M	m00365	683980	1461	469167429
-M	m00366	685442	505	1259843099
-M	m00367	685948	215	1012483995
-M	m00368	686164	13	393216940
-M	m00369	686178	6170	1068991840
-M	m00370	692349	1884	3967514723
-M	m00371	694234	90	2233015987
-M	m00372	694325	3704	388882007
-M	m00373	698030	826	2181890176
-M	m00374	698857	5038	4165976339
-M	m00375	703896	1484	285671642
-M	m00376	705381	4496	2132796153
-M	m00377	709878	3395	2528419820
-M	m00378	713274	2420	3543943899
-M	m00379	715695	680	1111156744
-M	m00380	716376	998	3888539405
-M	m00381	717375	4076	1925684335
-M	m00382	721452	927	3873914255
-M	m00383	722380	32	3311209443
-M	m00384	722413	3101	1992764663
-M	m00385	725515	952	2015314398
-M	m00386	726468	187	3300671414
-M	m00387	726656	243	13059504
-M	m00388	726900	5252	2938737771
-M	m00389	732153	1333	1860161918
-M	m00390	733487	2667	2397018603
-M	m00391	736155	1659	1130445394
-M	m00392	737815	2528	4173815421
-M	m00393	740344	236	1401443679
-M	m00394	740581	2820	4030960432
-M	m00395	743402	182	269958229
-M	m00396	743585	1025	818239247
-M	m00397	744611	3932	1966675426
-M	m00398	748544	78	3281590466
-M	m00399	748623	72	2499156219
-M	m00400	748696	3760	1201441498
-M	m00401	752457	1597	741349895
-M	m00402	754055	21	1329071910
-M	m00403	754077	36	4163112136
-M	m00404	754114	245	865424936
-M	m00405	754360	103	1173758908
-M	m00406	754464	21	1420756907
-M	m00407	754486	15	703464803
-M	m00408	754502	593	262981837
-M	m00409	755096	9	225772179
-M	m00410	755106	172	2731620840
-M	m00411	755279	14	547882068
-M	m00412	755294	18	944834053
-M	m00413	755313	16	727319861
-M	m00414	755330	13	470090745
-M	m00415	755344	19	1035404864
-M	m00416	755364	20	1153173209
-M	m00417	755385	7	141754877
-M	m00418	755393	12	400163724
-M	m00419	755406	10	279184116
-M	m00420	755417	49	3348500888
-M	m00421	755467	5589	1402330301
-M	m00422	761057	102	4194050986
-M	m00423	761160	5353	1200533639
-M	m00424	766514	5292	127678671
-M	m00425	771807	1908	1633708706
-M	m00426	773716	774	1262814615
-M	m00427	774491	2516	1017995881
-M	m00428	777008	160	715404945
-M	m00429	777169	264	1214929823
-M	m00430	777434	851	3810076214
-M	m00431	778286	117	2123113185
-M	m00432	778404	13	502137919
-M	m00433	778418	630	3729774149
-M	m00434	779049	14	636814584
-M	m00435	779064	1160	2715914852
-M	m00436	780225	925	722224053
-M	m00437	781151	1102	874805110
-M	m00438	782254	1618	3786481656
-M	m00439	783873	1975	4160459906
-M	m00440	785849	443	3710096174
-M	m00441	786293	1568	388104979
-M	m00442	787862	21	1302595359
-M	m00443	787884	983	1693669687
-M	m00444	788868	98	679682993
-M	m00445	788967	1169	1657579515
-M	m00446	790137	119	2892310771
-M	m00447	790257	710	437188290
-M	m00448	790968	377	1924368082
-M	m00449	791346	177	529939621
-M	m00450	791524	3396	876068704
-M	m00451	794921	81	2313231473
-M	m00452	795003	5158	1406007174
-M	m00453	800162	219	2100315209
-M	m00454	800382	266	3945814243
-M	m00455	800649	966	481185655
-M	m00456	801616	124	2346658306
-M	m00457	801741	213	2192918051
-M	m00458	801955	278	1309040189
-M	m00459	802234	1919	3154418873
-M	m00460	804154	109	4212729088
-M	m00461	804264	768	1048115002
-M	m00462	805033	183	447364616
-M	m00463	805217	1599	274936415
-M	m00464	806817	1448	1836251063
-M	m00465	808266	128	3419679649
-M	m00466	808395	75	3941866036
-M	m00467	808471	4973	1862502185
-M	m00468	813445	1107	1762086340
-M	m00469	814553	3847	3811449417
-M	m00470	818401	5158	384508350
-M	m00471	823560	560	2872557079
-M	m00472	824121	208	1637894006
-M	m00473	824330	3411	3487739069
-M	m00474	827742	312	1012625745
-M	m00475	828055	4936	29206560
-M	m00476	832992	49	3288863126
-M	m00477	833042	90	3402571738
-M	m00478	833133	97	1913004335
-M	m00479	833231	179	620837342
-M	m00480	833411	619	3966488751
-M	m00481	834031	108	3972998610
-M	m00482	834140	222	4113060233
-M	m00483	834363	75	3879672482
-M	m00484	834439	276	93544331
-M	m00485	834716	614	2401621450
-M	m00486	835331	34	3438087187
-M	m00487	835366	6	105710036
-M	m00488	835373	177	1040727895
-M	m00489	835551	98	1863655934
-M	m00490	835650	30	1877280476
-M	m00491	835681	3028	2718120123
-M	m00492	838710	1359	2319638234
-M	m00493	840070	68	993073288
-M	m00494	840139	4780	2408253012
-M	m00495	844920	4801	2757455445
-M	m00496	849722	3168	3078365831
-M	m00497	852891	1310	845141290
-M	m00498	854202	104	2606376079
-M	m00499	854307	1207	965251653
-M	m00500	855515	2230	3020036034
-M	m00501	857746	787	3436254093
-M	m00502	858534	18	967050738
-M	m00503	858553	4753	134109584
-M	m00504	863307	803	4052418262
-M	m00505	864111	2943	915588454
-M	m00506	867055	733	3670858309
-M	m00507	867789	385	2734850861
-M	m00508	868175	4270	3067343345
-M	m00509	872446	462	315588143
-M	m00510	872909	2582	290488263
-M	m00511	875492	1278	2345453283
-M	m00512	876771	198	3254076047
-M	m00513	876970	590	2263863068
-M	m00514	877561	39	4276489398
-M	m00515	877601	1555	84345364
-M	m00516	879157	1633	3079150791
-M	m00517	880791	4633	1850498750
-M	m00518	885425	1721	3026409013
-M	m00519	887147	2650	2138160209
-M	m00520	889798	78	1055923079
-M	m00521	889877	381	2331410935
-M	m00522	890259	165	2875603865
-M	m00523	890425	1352	2216673219
-M	m00524	891778	1985	3991978405
-M	m00525	893764	363	49380726
-M	m00526	894128	4034	2237160399
-M	m00527	898163	1725	2662599190
-M	m00528	899889	2756	3009179636
-M	m00529	902646	126	280046515
-M	m00530	902773	4	45220116
-M	m00531	902778	3986	934444555
-M	m00532	906765	2941	169672087
-M	m00533	909707	1270	1656275739
-M	m00534	910978	185	3997712309
-M	m00535	911164	88	3671596264
-M	m00536	911253	73	2309953632
-M	m00537	911327	189	2031306035
-M	m00538	911517	22	1449199476
-M	m00539	911540	106	518334005
-M	m00540	911647	3237	3963839694
-M	m00541	914885	40	4236708859
-M	m00542	914926	793	1228345275
-M	m00543	915720	362	2879421187
-M	m00544	916083	223	1418151981
-M	m00545	916307	242	1099584168
-M	m00546	916550	2697	2141967039
-M	m00547	919248	199	2315668379
-M	m00548	919448	26	2004682988
-M	m00549	919475	7	146014756
-M	m00550	919483	201	1771259118
-M	m00551	919685	85	3632798900
-M	m00552	919771	730	1483668957
-M	m00553	920502	506	2307829611
-M	m00554	921009	209	2133150723
-M	m00555	921219	8	200999554
-M	m00556	921228	572	1727382769
-M	m00557	921801	34	3477015589
-M	m00558	921836	267	288513906
-M	m00559	922104	367	2847308347
-M	m00560	922472	279	3927991142
-M	m00561	922752	547	396082915
-M	m00562	923300	6	90440100
-M	m00563	923307	27	2225211631
-M	m00564	923335	278	2288541084
-M	m00565	923614	241	2678412168
-M	m00566	923856	49	2709786779
-M	m00567	923906	334	1656058789
-M	m00568	924241	596	2340082880
-M	m00569	924838	97	786112365
-M	m00570	924936	75	632167327
-M	m00571	925012	99	1894260799
-M	m00572	925112	77	1572084889
-M	m00573	925190	34	3173190248
-M	m00574	925225	4	36503764
-M	m00575	925230	72	1303189198
-M	m00576	925303	50	2948534479
-M	m00577	925354	15	557253770
-M	m00578	925370	123	3465685696
-M	m00579	925494	56	4189590408
-M	m00580	925551	202	3044951617
-M	m00581	925754	139	688336789
-M	m00582	925894	96	250224382
-M	m00583	925991	431	3436616256
-M	m00584	926423	3421	4227830342
-M	m00585	929845	302	3299501824
-M	m00586	930148	342	3901714745
-M	m00587	930491	264	1844599929
-M	m00588	930756	2633	17663996
-M	m00589	933390	36	3623816082
-M	m00590	933427	3465	2381688295
-M	m00591	936893	222	310661635
-M	m00592	937116	224	2335396368
-M	m00593	937341	363	2597419871
-M	m00594	937705	1160	3065748476
-M	m00595	938866	17	753993064
-M	m00596	938884	229	3577694984
-M	m00597	939114	158	1296709019
-M	m00598	939273	1054	1311664182
-M	m00599	940328	287	42492798
-M	m00600	940616	100	1190928250
-M	m00601	940717	1122	2369739163
-M	m00602	941840	1663	1154537965
-M	m00603	943504	1027	3158985155
-M	m00604	944532	154	1976643779
-M	m00605	944687	205	290670010
-M	m00606	944893	171	1282226547
-M	m00607	945065	52	3922268846
-M	m00608	945118	27	2075265238
-M	m00609	945146	89	1018240362
-M	m00610	945236	48	3231322636
-M	m00611	945285	190	678314347
-M	m00612	945476	501	2832179329
-M	m00613	945978	966	3224588890
-M	m00614	946945	4119	1752731449
-M	m00615	951065	3979	2279958996
-M	m00616	955045	70	1648367645
-M	m00617	955116	162	2943825429
-M	m00618	955279	1871	3330563793
-M	m00619	957151	1499	108655992
-M	m00620	958651	2426	1009525276
-M	m00621	961078	57	447615573
-M	m00622	961136	1252	1493479286
-M	m00623	962389	151	3648206078
-M	m00624	962541	266	2954123847
-M	m00625	962808	435	4954091
-M	m00626	963244	1012	1254054777
-M	m00627	964257	333	437154453
-M	m00628	964591	305	3701368894
-M	m00629	964897	167	4165155010
-M	m00630	965065	337	128546910
-M	m00631	965403	104	2085626738
-M	m00632	965508	16	804062641
-M	m00633	965525	143	3253154721
-M	m00634	965669	640	725606723
-M	m00635	966310	62	881529574
-M	m00636	966373	1996	619688947
-M	m00637	968370	2331	1988165406
-M	m00638	970702	21	1049494988
-M	m00639	970724	94	4195949771
-M	m00640	970819	1155	2253099230
-M	m00641	971975	607	2187707467
-M	m00642	972583	3177	972112941
-M	m00643	975761	1699	1955678726
-M	m00644	977461	1851	830047130
-M	m00645	979313	3975	3395711926
-M	m00646	983289	3962	3217787235
-M	m00647	987252	1258	2480063188
-M	m00648	988511	278	997677062
-M	m00649	988790	953	3504756280
-M	m00650	989744	23	1575225280
-M	m00651	989768	336	45051173
-M	m00652	990105	80	1817910177
-M	m00653	990186	173	2241281891
-M	m00654	990360	817	1905663454
-M	m00655	991178	3033	645998697
-M	m00656	994212	3959	2305129407
-M	m00657	998172	718	1986064098
-M	m00658	998891	387	4087187672
-M	m00659	999279	2603	1089760308
-M	m00660	1001883	492	162309181
-M	m00661	1002376	3324	1273058694
-M	m00662	1005701	17	865535382
-M	m00663	1005719	665	1042474361
-M	m00664	1006385	2183	1295569599
-M	m00665	1008569	574	1776403836
-M	m00666	1009144	166	992623149
-M	m00667	1009311	3892	3921419984
-M	m00668	1013204	883	855914405
-M	m00669	1014088	147	738669848
-M	m00670	1014236	1485	3907977274
-M	m00671	1015722	20	1163265576
-M	m00672	1015743	17	892143079
-M	m00673	1015761	544	1228470
-M	m00674	1016306	5	50463001
-M	m00675	1016312	143	8270221
-M	m00676	1016456	847	1128999120
-M	m00677	1017304	347	573339923
-M	m00678	1017652	14	626656458
-M	m00679	1017667	727	2544167889
-M	m00680	1018395	16	534709298
-M	m00681	1018412	1303	1485032975
-M	m00682	1019716	3248	1496547319
-M	m00683	1022965	336	3348659815
-M	m00684	1023302	75	4209777259
-M	m00685	1023378	415	3254095265
-M	m00686	1023794	1010	1629972064
-M	m00687	1024805	32	2781415856
-M	m00688	1024838	507	1808637482
-M	m00689	1025346	890	1303522645
-M	m00690	1026237	199	2643543077
-M	m00691	1026437	284	79257238
-M	m00692	1026722	13	560071848
-M	m00693	1026736	106	1257972635
-M	m00694	1026843	2874	2878465703
-M	m00695	1029718	3701	2891701757
-M	m00696	1033420	716	2449143280
-M	m00697	1034137	547	3787964628
-M	m00698	1034685	263	3957743836
-M	m00699	1034949	1868	2426054633
-M	m00700	1036818	421	1110216987
-M	m00701	1037240	517	3920081228
-M	m00702	1037758	159	1059795517
-M	m00703	1037918	840	1735793007
-M	m00704	1038759	161	1217869477
-M	m00705	1038921	831	3000118237
-M	m00706	1039753	486	2857805899
-M	m00707	1040240	103	1434592253
-M	m00708	1040344	1053	583036955
-M	m00709	1041398	10	286917406
-M	m00710	1041409	944	1980056657
-M	m00711	1042354	2094	1178115968
-M	m00712	1044449	229	567824996
-M	m00713	1044679	14	572982353
-M	m00714	1044694	101	241902572
-M	m00715	1044796	364	1247641567
-M	m00716	1045161	2465	153299918
-M	m00717	1047627	22	1220281971
-M	m00718	1047650	87	2469338949
-M	m00719	1047738	138	3067554529
-M	m00720	1047877	15	706020624
-M	m00721	1047893	13	447677355
-M	m00722	1047907	3406	1895921748
-M	m00723	1051314	621	227661670
-M	m00724	1051936	881	1839280678
-M	m00725	1052818	11	362677099
-M	m00726	1052830	518	3708659562
-M	m00727	1053349	709	2420242152
-M	m00728	1054059	102	585704033
-M	m00729	1054162	1140	4045833659
-M	m00730	1055303	675	897248200
-M	m00731	1055979	1584	1760957655
-M	m00732	1057564	7	114753953
-M	m00733	1057572	39	3526363716
-M	m00734	1057612	48	2828865887
-M	m00735	1057661	18	1031669376
-M	m00736	1057680	14	597034135
-M	m00737	1057695	3453	3566125128
-M	m00738	1061149	3651	3932196938
-M	m00739	1064801	166	1245854290
-M	m00740	1064968	3322	2663486559
-M	m00741	1068291	91	3632143463
-M	m00742	1068383	5	77857166
-M	m00743	1068389	105	2509776018
-M	m00744	1068495	117	510010657
-M	m00745	1068613	642	3576811474
-M	m00746	1069256	1823	1319262149
-M	m00747	1071080	2841	38501749
-M	m00748	1073922	24	1240467092
-M	m00749	1073947	24	1085474202
-M	m00750	1073972	425	2070906563
-M	m00751	1074398	1224	3831935236
-M	m00752	1075623	354	1918401973
-M	m00753	1075978	1585	4054067203
-M	m00754	1077564	10	297206629
-M	m00755	1077575	3477	257399914
-M	m00756	1081053	202	4270996649
-M	m00757	1081256	107	2984255064
-M	m00758	1081364	1831	2439004423
-M	m00759	1083196	198	3603444995
-M	m00760	1083395	19	914228405
-M	m00761	1083415	168	2102540082
-M	m00762	1083584	2063	2193004570
-M	m00763	1085648	1244	2574300577
-M	m00764	1086893	2643	2871441237
-M	m00765	1089537	610	3917997186
-M	m00766	1090148	1161	698978087
-M	m00767	1091310	927	3781573199
-M	m00768	1092238	1183	2148310067
-M	m00769	1093422	177	839794110
-M	m00770	1093600	1118	1554087498
-M	m00771	1094719	1857	2991686825
-M	m00772	1096577	78	1049631607
-M	m00773	1096656	3266	2941406963
-M	m00774	1099923	1497	823003209
-M	m00775	1101421	1855	331042390
-M	m00776	1103277	107	4204011476
-M	m00777	1103385	11	390792152
-M	m00778	1103397	14	632816909
-M	m00779	1103412	3427	2752815338
-M	m00780	1106840	211	1046824480
-M	m00781	1107052	3100	3509438003
-M	m00782	1110153	3380	2227472173
-M	m00783	1113534	3097	3697348356
-M	m00784	1116632	28	2255751348
-M	m00785	1116661	210	1684618700
-M	m00786	1116872	138	1434397354
-M	m00787	1117011	121	4059637611
-M	m00788	1117133	10	317195125
-M	m00789	1117144	44	763104736
-M	m00790	1117189	195	2257143476
-M	m00791	1117385	2556	4210722879
-M	m00792	1119942	773	443153686
-M	m00793	1120716	299	236018120
-M	m00794	1121016	1755	2746171163
-M	m00795	1122772	885	3299553976
-M	m00796	1123658	242	2133612336
-M	m00797	1123901	699	2526804208
-M	m00798	1124601	924	3483581997
-M	m00799	1125526	741	2422733847
-M	m00800	1126268	2278	59239778
-M	m00801	1128547	228	887705530
-M	m00802	1128776	26	1765148457
-M	m00803	1128803	13	459539368
-M	m00804	1128817	848	83107906
-M	m00805	1129666	785	2123501368
-M	m00806	1130452	207	850676703
-M	m00807	1130660	171	220872398
-M	m00808	1130832	3099	2266372745
-M	m00809	1133932	3230	2519931884
-M	m00810	1137163	526	68859838
-M	m00811	1137690	765	896394414
-M	m00812	1138456	281	948522433
-M	m00813	1138738	1073	1149594816
-M	m00814	1139812	245	2416726166
-M	m00815	1140058	2544	765610319
-M	m00816	1142603	3202	3605025322
-M	m00817	1145806	6	95027608
-M	m00818	1145813	12	395314037
-M	m00819	1145826	73	3756202839
-M	m00820	1145900	202	1232816071
-M	m00821	1146103	17	734266581
-M	m00822	1146121	10	243466899
-M	m00823	1146132	15	600900795
-M	m00824	1146148	15	707462519
-M	m00825	1146164	6	57999638
-M	m00826	1146171	8	181469816
-M	m00827	1146180	12	432800751
-M	m00828	1146193	11	314049291
-M	m00829	1146205	285	2153472259
-M	m00830	1146491	2753	1702281605
-M	m00831	1149245	917	3561831249
-M	m00832	1150163	1982	925217094
-M	m00833	1152146	29	2547386903
-M	m00834	1152176	2833	3866015277
-M	m00835	1155010	2057	55160704
-M	m00836	1157068	402	2886502892
-M	m00837	1157471	561	3298672562
-M	m00838	1158033	17	760612152
-M	m00839	1158051	91	4011073882
-M	m00840	1158143	548	397065801
-M	m00841	1158692	57	561123903
-M	m00842	1158750	20	954467759
-M	m00843	1158771	107	528490899
-M	m00844	1158879	699	1757538831
-M	m00845	1159579	409	1539934356
-M	m00846	1159989	888	2212042855
-M	m00847	1160878	1579	3585208884
-M	m00848	1162458	163	3196336051
-M	m00849	1162622	144	3876074549
-M	m00850	1162767	30	2349730122
-M	m00851	1162798	15	700777790
-M	m00852	1162814	102	2684036572
-M	m00853	1162917	226	3009563285
-M	m00854	1163144	299	1032217224
-M	m00855	1163444	18	855639439
-M	m00856	1163463	12	468583470
-M	m00857	1163476	15	745538957
-M	m00858	1163492	51	3564638685
-M	m00859	1163544	87	927473073
-M	m00860	1163632	17	907216375
-M	m00861	1163650	188	1208762513
-M	m00862	1163839	2132	2464733105
-M	m00863	1165972	261	2362724520
-M	m00864	1166234	303	1986029879
-M	m00865	1166538	2338	3295947301
-M	m00866	1168877	66	165549765
-M	m00867	1168944	307	1864853620
-M	m00868	1169252	2242	1295113750
-M	m00869	1171495	4	28770478
-M	m00870	1171500	246	672813519
-M	m00871	1171747	193	2872132784
-M	m00872	1171941	80	605821646
-M	m00873	1172022	769	2307721747
-M	m00874	1172792	1094	3864949903
-M	m00875	1173887	22	1383204544
-M	m00876	1173910	1186	2770441553
-M	m00877	1175097	1008	134241511
-M	m00878	1176106	506	1709946839
-M	m00879	1176613	71	3755807996
-M	m00880	1176685	947	1839413141
-M	m00881	1177633	59	3840151293
-M	m00882	1177693	13	317588169
-M	m00883	1177707	227	964446658
-M	m00884	1177935	605	2495532951
-M	m00885	1178541	873	1619403712
-M	m00886	1179415	131	2654154066
-M	m00887	1179547	1022	2444907200
-M	m00888	1180570	316	3274339490
-M	m00889	1180887	171	3457171072
-M	m00890	1181059	76	3812694399
-M	m00891	1181136	25	1692796921
-M	m00892	1181162	1152	3900279874
-M	m00893	1182315	277	886857804
-M	m00894	1182593	184	1187135235
-M	m00895	1182778	16	817563075
-M	m00896	1182795	83	2476940299
-M	m00897	1182879	169	3199548199
-M	m00898	1183049	2209	1754333849
-M	m00899	1185259	453	3713767734
-M	m00900	1185713	2622	1495235173
-M	m00901	1188336	314	376008028
-M	m00902	1188651	2878	2056711780
-M	m00903	1191530	161	3603707995
-M	m00904	1191692	654	11986064
-M	m00905	1192347	1237	1292744155
-M	m00906	1193585	365	2963637224
-M	m00907	1193951	2881	1060128227
-M	m00908	1196833	114	1855858136
-M	m00909	1196948	364	2928114686
-M	m00910	1197313	38	188747094
-M	m00911	1197352	184	145047463
-M	m00912	1197537	16	427229983
-M	m00913	1197554	197	177226438
-M	m00914	1197752	1306	2959382480
-M	m00915	1199059	41	1062276876
-M	m00916	1199101	36	3707964362
-M	m00917	1199138	1096	3586883516
-M	m00918	1200235	340	3372051327
-M	m00919	1200576	196	4011410644
-M	m00920	1200773	116	3977586465
-M	m00921	1200890	103	1150493535
-M	m00922	1200994	10	247071411
-M	m00923	1201005	842	3546491033
-M	m00924	1201848	481	1046718377
-M	m00925	1202330	33	3026914015
-M	m00926	1202364	609	787404127
-M	m00927	1202974	902	3197254349
-M	m00928	1203877	267	3004717963
-M	m00929	1204145	207	2499429657
-M	m00930	1204353	1096	2526968657
-M	m00931	1205450	2522	2196400798
-M	m00932	1207973	175	4142088328
-M	m00933	1208149	250	3502724362
-M	m00934	1208400	2575	575639900
-M	m00935	1210976	2792	3321613591
-M	m00936	1213769	15	756417914
-M	m00937	1213785	119	356786577
-M	m00938	1213905	9	216859283
-M	m00939	1213915	2268	4012906929
-M	m00940	1216184	2574	3730785242
-M	m00941	1218759	50	2743603316
-M	m00942	1218810	100	1807425486
-M	m00943	1218911	686	446558860
-M	m00944	1219598	1758	444947028
-M	m00945	1221357	2665	1920944442
-M	m00946	1224023	10	239928023
-M	m00947	1224034	847	1463685849
-M	m00948	1224882	12	316801809
-M	m00949	1224895	1206	3684600041
-M	m00950	1226102	2048	880858367
-M	m00951	1228151	466	574658766
-M	m00952	1228618	2813	1127540857
-M	m00953	1231432	347	854488719
-M	m00954	1231780	128	1096493410
-M	m00955	1231909	67	887887900
-M	m00956	1231977	29	2121205949
-M	m00957	1232007	14	324797107
-M	m00958	1232022	13	563741903
-M	m00959	1232036	329	2963630133
-M	m00960	1232366	313	4202191209
-M	m00961	1232680	214	2382317808
-M	m00962	1232895	420	104435189
-M	m00963	1233316	2071	2746017251
-M	m00964	1235388	95	1854415258
-M	m00965	1235484	1641	2653565297
-M	m00966	1237126	255	1541298662
-M	m00967	1237382	583	1772012460
-M	m00968	1237966	13	522191996
-M	m00969	1237980	306	1815046647
-M	m00970	1238287	73	2387548239
-M	m00971	1238361	27	2274101588
-M	m00972	1238389	1019	2635296009
-M	m00973	1239409	1370	233103845
-M	m00974	1240780	2669	2648548199
-M	m00975	1243450	51	2988118001
-M	m00976	1243502	19	1169688135
-M	m00977	1243522	16	648676491
-M	m00978	1243539	80	2281446496
-M	m00979	1243620	174	3235265838
-M	m00980	1243795	1097	3686425432
-M	m00981	1244893	1301	1405203891
-M	m00982	1246195	61	1373311462
-M	m00983	1246257	13	469894058
-M	m00984	1246271	10	311100238
-M	m00985	1246282	66	4191098515
-M	m00986	1246349	75	2587760730
-M	m00987	1246425	1318	1714999496
-M	m00988	1247744	77	834935526
-M	m00989	1247822	160	873017305
-M	m00990	1247983	41	742067725
-M	m00991	1248025	74	3386055174
-M	m00992	1248100	136	267530297
-M	m00993	1248237	1500	165283855
-M	m00994	1249738	89	3821149357
-M	m00995	1249828	925	1910258055
-M	m00996	1250754	2767	2331292075
-M	m00997	1253522	165	2053519528
-M	m00998	1253688	2407	2036416131
-M	m00999	1256096	2182	3000295169
-M	m01000	1258279	152	3131127603
-M	m01001	1258432	80	218438232
-M	m01002	1258513	67	2707952956
-M	m01003	1258581	1964	1349233036
-M	m01004	1260546	1396	3704199973
-M	m01005	1261943	1000	3061528975
-M	m01006	1262944	74	2911836531
-M	m01007	1263019	35	3471706980
-M	m01008	1263055	597	1291372029
-M	m01009	1263653	48	2574651447
-M	m01010	1263702	536	1242347943
-M	m01011	1264239	310	1602971704
-M	m01012	1264550	51	1812925856
-M	m01013	1264602	2170	2822955531
-M	m01014	1266773	83	3597147421
-M	m01015	1266857	1495	1611398679
-M	m01016	1268353	25	1835403467
-M	m01017	1268379	44	1378619286
-M	m01018	1268424	11	374801292
-M	m01019	1268436	290	4035078621
-M	m01020	1268727	69	1238833071
-M	m01021	1268797	435	2778765857
-M	m01022	1269233	12	409011188
-M	m01023	1269246	354	3067440432
-M	m01024	1269601	406	2725478743
-M	m01025	1270008	803	151002195
-M	m01026	1270812	2615	945195819
-M	m01027	1273428	1442	4004051463
-M	m01028	1274871	415	56725504
-M	m01029	1275287	40	4087155562
-M	m01030	1275328	5	54657297
-M	m01031	1275334	33	3508407416
-M	m01032	1275368	82	635509065
-M	m01033	1275451	106	3721471421
-M	m01034	1275558	2344	1500981233
-M	m01035	1277903	32	3138128730
-M	m01036	1277936	2303	2278238013
-M	m01037	1280240	2253	2058941923
-M	m01038	1282494	80	1036065576
-M	m01039	1282575	1812	1318879190
-M	m01040	1284388	8	211813058
-M	m01041	1284397	19	1094583951
-M	m01042	1284417	35	3851291712
-M	m01043	1284453	104	3386058099
-M	m01044	1284558	2568	3894837698
-M	m01045	1287127	15	675874056
-M	m01046	1287143	346	1002863235
-M	m01047	1287490	1097	3300552599
-M	m01048	1288588	201	3661906308
-M	m01049	1288790	279	950427204
-M	m01050	1289070	328	3454497581
-M	m01051	1289399	2119	51763665
-M	m01052	1291519	675	1163514120
-M	m01053	1292195	267	3521267982
-M	m01054	1292463	1343	2150727155
-M	m01055	1293807	2675	2620195308
-M	m01056	1296483	2645	834296937
-M	m01057	1299129	332	323776892
-M	m01058	1299462	44	1325928276
-M	m01059	1299507	501	4251951159
-M	m01060	1300009	338	335241826
-M	m01061	1300348	297	93021968
-M	m01062	1300646	116	1374628067
-M	m01063	1300763	54	2738032465
-M	m01064	1300818	82	3081575532
-M	m01065	1300901	105	3670287730
-M	m01066	1301007	32	2501904866
-M	m01067	1301040	1362	4276996026
-M	m01068	1302403	2403	3351594649
-M	m01069	1304807	2028	2317783633
-M	m01070	1306836	286	2775671582
-M	m01071	1307123	88	1776754513
-M	m01072	1307212	769	838995728
-M	m01073	1307982	938	413877528
-M	m01074	1308921	256	1452233114
-M	m01075	1309178	2228	3632917936
-M	m01076	1311407	35	3601009676
-M	m01077	1311443	968	2534623126
-M	m01078	1312412	74	3053656068
-M	m01079	1312487	11	217580095
-M	m01080	1312499	795	3470135879
-M	m01081	1313295	34	3419868041
-M	m01082	1313330	2261	2963537470
-M	m01083	1315592	77	557783811
-M	m01084	1315670	1101	3247076271
-M	m01085	1316772	1109	523208316
-M	m01086	1317882	266	551640575
-M	m01087	1318149	656	2823741944
-M	m01088	1318806	242	894259841
-M	m01089	1319049	382	912295446
-M	m01090	1319432	98	1815289988
-M	m01091	1319531	2359	2304588353
-M	m01092	1321891	506	3269306653
-M	m01093	1322398	1748	3436931399
-M	m01094	1324147	2363	2398681208
-M	m01095	1326511	46	1642991481
-M	m01096	1326558	2206	3389521620
-M	m01097	1328765	319	2406113419
-M	m01098	1329085	1738	3290975785
-M	m01099	1330824	143	835727767
-M	m01100	1330968	761	953682141
-M	m01101	1331730	1292	824496355
-M	m01102	1333023	186	3184737515
-M	m01103	1333210	1835	1724408826
-M	m01104	1335046	2432	3924121165
-M	m01105	1337479	1215	2160693598
-M	m01106	1338695	1069	556227415
-M	m01107	1339765	2016	2263670141
-M	m01108	1341782	126	1991388581
-M	m01109	1341909	2251	2524577991
-M	m01110	1344161	1445	3243504727
-M	m01111	1345607	364	1159168934
-M	m01112	1345972	35	3990752561
-M	m01113	1346008	66	4190639740
-M	m01114	1346075	2237	1886327412
-M	m01115	1348313	664	3380272066
-M	m01116	1348978	1445	4112248431
-M	m01117	1350424	171	1858154738
-M	m01118	1350596	38	378146263
-M	m01119	1350635	1663	1922579801
-M	m01120	1352299	34	3454077958
-M	m01121	1352334	1593	1207442351
-M	m01122	1353928	35	3978825036
-M	m01123	1353964	41	260705578
-M	m01124	1354006	509	2607914359
-M	m01125	1354516	824	1850743511
-M	m01126	1355341	163	4047647665
-M	m01127	1355505	297	2003329416
-M	m01128	1355803	952	1431194489
-M	m01129	1356756	928	1584675828
-M	m01130	1357685	78	599136999
-M	m01131	1357764	81	1992235756
-M	m01132	1357846	43	1067585140
-M	m01133	1357890	370	4035543422
-M	m01134	1358261	1376	1332598662
-M	m01135	1359638	1127	2275110923
-M	m01136	1360766	394	25134555
-M	m01137	1361161	525	1197976257
-M	m01138	1361687	920	1057700411
-M	m01139	1362608	119	1836065331
-M	m01140	1362728	28	2416249244
-M	m01141	1362757	633	1469701403
-M	m01142	1363391	1047	1801007174
-M	m01143	1364439	1137	141834901
-M	m01144	1365577	2142	4103266276
-M	m01145	1367720	292	3628029477
-M	m01146	1368013	1733	3588773107
-M	m01147	1369747	1061	4090388724
-M	m01148	1370809	831	747639835
-M	m01149	1371641	131	1860644690
-M	m01150	1371773	638	3072446271
-M	m01151	1372412	450	1977520205
-M	m01152	1372863	125	499133599
-M	m01153	1372989	784	2625239904
-M	m01154	1373774	1216	2987957018
-M	m01155	1374991	8	123273710
-M	m01156	1375000	393	251954220
-M	m01157	1375394	566	1261742447
-M	m01158	1375961	614	503693965
-M	m01159	1376576	221	780487915
-M	m01160	1376798	532	2650978321
-M	m01161	1377331	906	1474379348
-M	m01162	1378238	157	3449108195
-M	m01163	1378396	295	2777047359
-M	m01164	1378692	32	2914060946
-M	m01165	1378725	62	3424392743
-M	m01166	1378788	18	1102907032
-M	m01167	1378807	637	2998919742
-M	m01168	1379445	2212	1157561667
-M	m01169	1381658	2059	10791088
-M	m01170	1383718	2193	152895303
-M	m01171	1385912	88	1776557905
-M	m01172	1386001	36	3955756231
-M	m01173	1386038	1069	2923327865
-M	m01174	1387108	466	3932070356
-M	m01175	1387575	2180	2216746428
-M	m01176	1389756	390	884311565
-M	m01177	1390147	167	2134193694
-M	m01178	1390315	1408	2364924529
-M	m01179	1391724	73	2626689358
-M	m01180	1391798	1563	4021884009
-M	m01181	1393362	81	2361007105
-M	m01182	1393444	138	698036063
-M	m01183	1393583	1220	244294313
-M	m01184	1394804	275	4214513928
-M	m01185	1395080	2110	1378795171
-M	m01186	1397191	96	2060984897
-M	m01187	1397288	1139	292980106
-M	m01188	1398428	626	1328143754
-M	m01189	1399055	134	3932761356
-M	m01190	1399190	484	4147618948
-M	m01191	1399675	5	63373632
-M	m01192	1399681	931	61941242
-M	m01193	1400613	626	2060108794
-M	m01194	1401240	5	75760004
-M	m01195	1401246	1250	1920764028
-M	m01196	1402497	1900	3960578591
-M	m01197	1404398	246	2965195687
-M	m01198	1404645	911	1594100436
-M	m01199	1405557	701	3450790217
-M	m01200	1406259	2037	2001714665
-M	m01201	1408297	2028	14404697
-M	m01202	1410326	178	2694725211
-M	m01203	1410505	1755	854088678
-M	m01204	1412261	1336	632873066
-M	m01205	1413598	246	1420842634
-M	m01206	1413845	95	3229098743
-M	m01207	1413941	2016	1570089405
-M	m01208	1415958	40	386338261
-M	m01209	1415999	1379	2777013802
-M	m01210	1417379	277	141647124
-M	m01211	1417657	1443	2430199688
-M	m01212	1419101	296	1604740401
-M	m01213	1419398	248	2521847777
-M	m01214	1419647	963	1016156144
-M	m01215	1420611	590	2765606249
-M	m01216	1421202	48	2447970353
-M	m01217	1421251	100	4128842467
-M	m01218	1421352	1488	433327708
-M	m01219	1422841	1993	3580592821
-M	m01220	1424835	124	3090033484
-M	m01221	1424960	1749	3605354532
-M	m01222	1426710	1982	181247828
-M	m01223	1428693	1188	692424074
-M	m01224	1429882	392	432046016
-M	m01225	1430275	177	1785478397
-M	m01226	1430453	354	2598075443
-M	m01227	1430808	1483	1477309547
-M	m01228	1432292	1618	2151555447
-M	m01229	1433911	50	2648444998
-M	m01230	1433962	16	773326198
-M	m01231	1433979	253	2930070885
-M	m01232	1434233	52	185603015
-M	m01233	1434286	594	1736562113
-M	m01234	1434881	34	3482848056
-M	m01235	1434916	390	1336837840
-M	m01236	1435307	188	2180138259
-M	m01237	1435496	589	1456128067
-M	m01238	1436086	341	3500570842
-M	m01239	1436428	77	2511018238
-M	m01240	1436506	198	2063549518
-M	m01241	1436705	453	449748284
-M	m01242	1437159	314	311127467
-M	m01243	1437474	707	3259494792
-M	m01244	1438182	253	1396660148
-M	m01245	1438436	393	1468303162
-M	m01246	1438830	45	363400444
-M	m01247	1438876	33	3233942273
-M	m01248	1438910	8	188351141
-M	m01249	1438919	1362	849008790
-M	m01250	1440282	166	1656108877
-M	m01251	1440449	161	2243377006
-M	m01252	1440611	1171	3944455246
-M	m01253	1441783	197	184828361
-M	m01254	1441981	513	144749282
-M	m01255	1442495	866	565060070
-M	m01256	1443362	1270	2861674572
-M	m01257	1444633	32	3137080040
-M	m01258	1444666	101	1866081457
-M	m01259	1444768	1817	809443899
-M	m01260	1446586	1921	2185442963
-M	m01261	1448508	1082	2647754562
-M	m01262	1449591	573	3888303179
-M	m01263	1450165	1906	1516997571
-M	m01264	1452072	56	2905214913
-M	m01265	1452129	1612	793845577
-M	m01266	1453742	1297	3353464054
-M	m01267	1455040	304	1959816416
-M	m01268	1455345	461	1600166593
-M	m01269	1455807	891	2561748537
-M	m01270	1456699	1630	4114819666
-M	m01271	1458330	545	727294746
-M	m01272	1458876	1104	285753899
-M	m01273	1459981	240	2855621198
-M	m01274	1460222	412	652708819
-M	m01275	1460635	714	2571565243
-M	m01276	1461350	1861	617841643
-M	m01277	1463212	1344	119257478
-M	m01278	1464557	54	4204401213
-M	m01279	1464612	132	3670092863
-M	m01280	1464745	23	1607403508
-M	m01281	1464769	536	2059777883
-M	m01282	1465306	1073	1416191862
-M	m01283	1466380	61	3187347361
-M	m01284	1466442	978	3191295899
-M	m01285	1467421	47	3775400415
-M	m01286	1467469	33	3425897378
-M	m01287	1467503	82	2619284534
-M	m01288	1467586	1073	818246564
-M	m01289	1468660	654	4035171415
-M	m01290	1469315	18	803079440
-M	m01291	1469334	55	1068831679
-M	m01292	1469390	102	4192412385
-M	m01293	1469493	353	3894833926
-M	m01294	1469847	52	3826192816
-M	m01295	1469900	813	3551988345
-M	m01296	1470714	24	1562904312
-M	m01297	1470739	1711	4032832482
-M	m01298	1472451	1272	2642525032
-M	m01299	1473724	323	3891228188
-M	m01300	1474048	82	2097814389
-M	m01301	1474131	1389	1933103721
-M	m01302	1475521	109	1885938494
-M	m01303	1475631	1472	3640588893
-M	m01304	1477104	93	3638432997
-M	m01305	1477198	98	3988988761
-M	m01306	1477297	1122	1890547528
-M	m01307	1478420	306	3773459373
-M	m01308	1478727	1289	1372110555
-M	m01309	1480017	51	3617526256
-M	m01310	1480069	17	777782638
-M	m01311	1480087	14	633537794
-M	m01312	1480102	80	2762349878
-M	m01313	1480183	937	3245362400
-M	m01314	1481121	569	2648296515
-M	m01315	1481691	1624	4107416791
-M	m01316	1483316	1755	2103997807
-M	m01317	1485072	1767	1459050541
-M	m01318	1486840	702	2347427177
-M	m01319	1487543	685	2509498718
-M	m01320	1488229	173	1569471897
-M	m01321	1488403	242	2329104510
-M	m01322	1488646	339	1475899639
-M	m01323	1488986	58	1524372535
-M	m01324	1489045	873	1594238736
-M	m01325	1489919	112	2471175957
-M	m01326	1490032	27	2230913455
-M	m01327	1490060	299	3084805014
-M	m01328	1490360	1624	160378608
-M	m01329	1491985	526	565097656
-M	m01330	1492512	1112	2047903477
-M	m01331	1493625	353	1841134919
-M	m01332	1493979	686	2269048784
-M	m01333	1494666	458	1567662599
-M	m01334	1495125	565	861781286
-M	m01335	1495691	1009	556352931
-M	m01336	1496701	52	3578007911
-M	m01337	1496754	1444	3279415594
-M	m01338	1498199	598	4287354432
-M	m01339	1498798	814	3560710411
-M	m01340	1499613	42	814681531
-M	m01341	1499656	1691	2096905786
-M	m01342	1501348	589	3416445087
-M	m01343	1501938	446	568369649
-M	m01344	1502385	25	1916668134
-M	m01345	1502411	64	3971618292
-M	m01346	1502476	498	3909265883
-M	m01347	1502975	833	1352477211
-M	m01348	1503809	580	853918771
-M	m01349	1504390	993	199249759
-M	m01350	1505384	722	228655204
-M	m01351	1506107	235	3990311917
-M	m01352	1506343	172	2263629504
-M	m01353	1506516	111	108275915
-M	m01354	1506628	181	1790327634
-M	m01355	1506810	1205	2597954817
-M	m01356	1508016	115	4100728787
-M	m01357	1508132	172	2760523054
-M	m01358	1508305	81	2471304212
-M	m01359	1508387	331	828339949
-M	m01360	1508719	1652	595212769
-M	m01361	1510372	1623	971187546
-M	m01362	1511996	693	3519608827
-M	m01363	1512690	704	3760977395
-M	m01364	1513395	1638	2844779517
-M	m01365	1515034	1484	989981189
-M	m01366	1516519	166	4022024586
-M	m01367	1516686	22	1209730635
-M	m01368	1516709	15	578290756
-M	m01369	1516725	524	2527897230
-M	m01370	1517250	149	21443534
-M	m01371	1517400	1595	1988764333
-M	m01372	1518996	668	3392330635
-M	m01373	1519665	810	648090930
-M	m01374	1520476	708	717877198
-M	m01375	1521185	765	869270913
-M	m01376	1521951	310	3709823369
-M	m01377	1522262	1000	3070383944
-M	m01378	1523263	99	3708822203
-M	m01379	1523363	1379	67168380
-M	m01380	1524743	1494	3052265048
-M	m01381	1526238	247	960058542
-M	m01382	1526486	883	2264804732
-M	m01383	1527370	1011	1648581937
-M	m01384	1528382	143	2542350415
-M	m01385	1528526	64	2598769809
-M	m01386	1528591	750	2261909186
-M	m01387	1529342	537	831503072
-M	m01388	1529880	1306	114866493
-M	m01389	1531187	26	1936066538
-M	m01390	1531214	1218	264478945
-M	m01391	1532433	106	924329644
-M	m01392	1532540	51	3243118857
-M	m01393	1532592	756	3161390812
-M	m01394	1533349	366	2482928944
-M	m01395	1533716	70	1420695468
-M	m01396	1533787	16	804521262
-M	m01397	1533804	1237	2484561544
-M	m01398	1535042	1544	683936440
-M	m01399	1536587	1114	1717919593
-M	m01400	1537702	267	4276442781
-M	m01401	1537970	189	1181564622
-M	m01402	1538160	577	1968097496
-M	m01403	1538738	317	2377083982
-M	m01404	1539056	639	3149324838
-M	m01405	1539696	782	2377846311
-M	m01406	1540479	200	3519298321
-M	m01407	1540680	1232	2572246386
-M	m01408	1541913	794	1084621498
-M	m01409	1542708	188	762463521
-M	m01410	1542897	48	2017922725
-M	m01411	1542946	188	972112776
-M	m01412	1543135	64	3113751996
-M	m01413	1543200	42	929435134
-M	m01414	1543243	981	3566226114
-M	m01415	1544225	973	2760787155
-M	m01416	1545199	131	532032733
-M	m01417	1545331	206	3213574925
-M	m01418	1545538	270	2048480133
-M	m01419	1545809	954	3694215409
-M	m01420	1546764	39	71961779
-M	m01421	1546804	404	3365047087
-M	m01422	1547209	143	940782108
-M	m01423	1547353	548	769833617
-M	m01424	1547902	1493	1292765895
-M	m01425	1549396	227	1197821036
-M	m01426	1549624	245	4186854223
-M	m01427	1549870	764	1605567649
-M	m01428	1550635	566	3862344801
-M	m01429	1551202	825	1675169508
-M	m01430	1552028	1030	2265668987
-M	m01431	1553059	334	439052939
-M	m01432	1553394	1468	3900247585
-M	m01433	1554863	216	4110830274
-M	m01434	1555080	825	1024337902
-M	m01435	1555906	91	301474110
-M	m01436	1555998	1348	1588909481
-M	m01437	1557347	16	771425646
-M	m01438	1557364	12	448005140
-M	m01439	1557377	290	1912824775
-M	m01440	1557668	92	3091996502
-M	m01441	1557761	34	3271625565
-M	m01442	1557796	215	3464710367
-M	m01443	1558012	281	3816448200
-M	m01444	1558294	1091	271736582
-M	m01445	1559386	607	1796980464
-M	m01446	1559994	491	1915857888
-M	m01447	1560486	19	1023280585
-M	m01448	1560506	35	1994065594
-M	m01449	1560542	45	3517778541
-M	m01450	1560588	718	1142419164
-M	m01451	1561307	370	2791473256
-M	m01452	1561678	112	3401392684
-M	m01453	1561791	1204	2083032782
-M	m01454	1562996	1271	243974742
-M	m01455	1564268	393	3107161644
-M	m01456	1564662	269	419255870
-M	m01457	1564932	274	2978766163
-M	m01458	1565207	52	3331264818
-M	m01459	1565260	1426	660594554
-M	m01460	1566687	1315	519950923
-M	m01461	1568003	1441	43964351
-M	m01462	1569445	311	2119789348
-M	m01463	1569757	736	310764989
-M	m01464	1570494	95	1335435579
-M	m01465	1570590	1184	144546757
-M	m01466	1571775	575	2226768294
-M	m01467	1572351	695	1238431677
-M	m01468	1573047	1286	2684209371
-M	m01469	1574334	380	465405361
-M	m01470	1574715	167	1303391750
-M	m01471	1574883	159	2779724528
-M	m01472	1575043	78	2271222881
-M	m01473	1575122	117	3333956948
-M	m01474	1575240	114	2090673783
-M	m01475	1575355	303	416901468
-M	m01476	1575659	117	2247566978
-M	m01477	1575777	102	8790394
-M	m01478	1575880	381	1092648383
-M	m01479	1576262	648	2349389579
-M	m01480	1576911	113	4136576946
-M	m01481	1577025	1128	2446361012
-M	m01482	1578154	151	3083940878
-M	m01483	1578306	1093	2809497373
-M	m01484	1579400	868	3466665115
-M	m01485	1580269	221	1103121831
-M	m01486	1580491	17	877659624
-M	m01487	1580509	1221	2566690516
-M	m01488	1581731	1413	307996312
-M	m01489	1583145	108	895624767
-M	m01490	1583254	1139	2951709807
-M	m01491	1584394	14	593364183
-M	m01492	1584409	1032	510552156
-M	m01493	1585442	43	1011813855
-M	m01494	1585486	903	1843476896
-M	m01495	1586390	35	3686141031
-M	m01496	1586426	149	1365914819
-M	m01497	1586576	13	368640827
-M	m01498	1586590	969	1325027378
-M	m01499	1587560	1402	2607909530
-M	m01500	1588963	1012	3552195736
-M	m01501	1589976	231	2966571519
-M	m01502	1590208	963	1447778032
-M	m01503	1591172	67	392042222
-M	m01504	1591240	17	738067632
-M	m01505	1591258	1109	2697748337
-M	m01506	1592368	992	656562892
-M	m01507	1593361	48	2873495965
-M	m01508	1593410	15	642843840
-M	m01509	1593426	1062	3621999314
-M	m01510	1594489	1187	1864277547
-M	m01511	1595677	114	2884379859
-M	m01512	1595792	1097	3554768472
-M	m01513	1596890	266	2237095589
-M	m01514	1597157	266	1021073444
-M	m01515	1597424	487	932096146
-M	m01516	1597912	193	399786709
-M	m01517	1598106	147	1866543113
-M	m01518	1598254	211	1629111725
-M	m01519	1598466	27	2438924775
-M	m01520	1598494	43	1686900593
-M	m01521	1598538	136	21244990
-M	m01522	1598675	9	214172337
-M	m01523	1598685	160	3292018643
-M	m01524	1598846	343	2917758772
-M	m01525	1599190	291	2448908384
-M	m01526	1599482	32	2993687293
-M	m01527	1599515	153	2940286079
-M	m01528	1599669	213	3514649977
-M	m01529	1599883	83	118496775
-M	m01530	1599967	127	1247489280
-M	m01531	1600095	1086	2907863404
-M	m01532	1601182	463	1697684493
-M	m01533	1601646	55	203035224
-M	m01534	1601702	93	2968854431
-M	m01535	1601796	40	602934616
-M	m01536	1601837	1317	3232611878
-M	m01537	1603155	1096	1315732023
-M	m01538	1604252	29	2375485730
-M	m01539	1604282	989	910447425
-M	m01540	1605272	481	1503895584
-M	m01541	1605754	324	1794141988
-M	m01542	1606079	13	570426547
-M	m01543	1606093	33	3305179818
-M	m01544	1606127	52	3961262640
-M	m01545	1606180	1105	1814660716
-M	m01546	1607286	827	622399783
-M	m01547	1608114	131	2886610354
-M	m01548	1608246	876	614612106
-M	m01549	1609123	36	3913419778
-M	m01550	1609160	471	2227871577
-M	m01551	1609632	127	3000116894
-M	m01552	1609760	428	4156132333
-M	m01553	1610189	441	924030581
-M	m01554	1610631	572	3732586756
-M	m01555	1611204	127	1968514975
-M	m01556	1611332	1013	2030266948
-M	m01557	1612346	203	3671278616
-M	m01558	1612550	840	3660383107
-M	m01559	1613391	497	1129751863
-M	m01560	1613889	635	81843665
-M	m01561	1614525	125	605759193
-M	m01562	1614651	1009	3388824434
-M	m01563	1615661	51	3436974485
-M	m01564	1615713	1047	3099488228
-M	m01565	1616761	93	268050673
-M	m01566	1616855	11	263455466
-M	m01567	1616867	912	2501192840
-M	m01568	1617780	1107	2262790796
-M	m01569	1618888	588	2811153228
-M	m01570	1619477	531	3549344057
-M	m01571	1620009	98	2605785570
-M	m01572	1620108	615	2364068806
-M	m01573	1620724	47	2502889638
-M	m01574	1620772	162	2502047792
-M	m01575	1620935	1208	4261908712
-M	m01576	1622144	1204	271426024
-M	m01577	1623349	376	317556109
-M	m01578	1623726	17	798098621
-M	m01579	1623744	538	2036577077
-M	m01580	1624283	292	3912786016
-M	m01581	1624576	345	2459464305
-M	m01582	1624922	267	1522556356
-M	m01583	1625190	1085	1441429871
-M	m01584	1626276	1205	2355597747
-M	m01585	1627482	535	3759189221
-M	m01586	1628018	419	2657390820
-M	m01587	1628438	1235	735870851
-M	m01588	1629674	1075	1036614162
-M	m01589	1630750	109	4218103215
-M	m01590	1630860	861	1593977578
-M	m01591	1631722	624	3851669792
-M	m01592	1632347	455	3826815581
-M	m01593	1632803	98	3051299291
-M	m01594	1632902	976	1320044782
-M	m01595	1633879	1037	2869191068
-M	m01596	1634917	1074	528313880
-M	m01597	1635992	109	4035715868
-M	m01598	1636102	47	2143489990
-M	m01599	1636150	819	3688829250
-M	m01600	1636970	145	4273352748
-M	m01601	1637116	719	1406727872
-M	m01602	1637836	10	221381244
-M	m01603	1637847	49	2818904263
-M	m01604	1637897	13	566297798
-M	m01605	1637911	20	1204094632
-M	m01606	1637932	1034	3673384052
-M	m01607	1638967	994	4166936348
-M	m01608	1639962	17	856884548
-M	m01609	1639980	99	3714458275
-M	m01610	1640080	952	2234662191
-M	m01611	1641033	434	2796131210
-M	m01612	1641468	599	2625423576
-M	m01613	1642068	139	692137857
-M	m01614	1642208	14	497746897
-M	m01615	1642223	16	763430166
-M	m01616	1642240	633	1371464727
-M	m01617	1642874	34	2883521067
-M	m01618	1642909	578	1784661635
-M	m01619	1643488	176	915946933
-M	m01620	1643665	72	369170100
-M	m01621	1643738	750	4263638679
-M	m01622	1644489	95	725295219
-M	m01623	1644585	944	1989818940
-M	m01624	1645530	94	919871759
-M	m01625	1645625	948	21776938
-M	m01626	1646574	1141	233341443
-M	m01627	1647716	480	3962547661
-M	m01628	1648197	407	1719504328
-M	m01629	1648605	555	1660466624
-M	m01630	1649161	477	2494733609
-M	m01631	1649639	955	3880076557
-M	m01632	1650595	74	1046025843
-M	m01633	1650670	16	457704247
-M	m01634	1650687	98	630269099
-M	m01635	1650786	302	2589811243
-M	m01636	1651089	237	2232504202
-M	m01637	1651327	165	1952724408
-M	m01638	1651493	225	3197062213
-M	m01639	1651719	1007	423648971
-M	m01640	1652727	235	2654359615
-M	m01641	1652963	764	3842443203
-M	m01642	1653728	768	2950629736
-M	m01643	1654497	1103	4091904796
-M	m01644	1655601	123	2666605363
-M	m01645	1655725	85	724701855
-M	m01646	1655811	684	2127817566
-M	m01647	1656496	1086	2947254619
-M	m01648	1657583	77	4208925306
-M	m01649	1657661	181	1583558906
-M	m01650	1657843	16	736036161
-M	m01651	1657860	74	390077129
-M	m01652	1657935	25	1056769220
-M	m01653	1657961	83	2738887715
-M	m01654	1658045	717	2293366867
-M	m01655	1658763	246	1357467474
-M	m01656	1659010	945	1202607197
-M	m01657	1659956	1071	951214904
-M	m01658	1661028	929	2558931663
-M	m01659	1661958	41	901844678
-M	m01660	1662000	3	14221420
-M	m01661	1662004	349	1771535094
-M	m01662	1662354	311	2449368925
-M	m01663	1662666	105	3082953882
-M	m01664	1662772	851	4011859217
-M	m01665	1663624	1065	4201410120
-M	m01666	1664690	884	1048850071
-M	m01667	1665575	183	1643855736
-M	m01668	1665759	19	1132332636
-M	m01669	1665779	614	518508471
-M	m01670	1666394	209	4062529512
-M	m01671	1666604	275	620583944
-M	m01672	1666880	560	2114177181
-M	m01673	1667441	271	3341309099
-M	m01674	1667713	37	3542747863
-M	m01675	1667751	25	1937180790
-M	m01676	1667777	60	931664676
-M	m01677	1667838	786	616956789
-M	m01678	1668625	123	2783980542
-M	m01679	1668749	496	3593445588
-M	m01680	1669246	218	2595507228
-M	m01681	1669465	30	1541080744
-M	m01682	1669496	82	2356812788
-M	m01683	1669579	110	867444009
-M	m01684	1669690	1040	3036502577
-M	m01685	1670731	61	2857768488
-M	m01686	1670793	587	1159644059
-M	m01687	1671381	10	260309694
-M	m01688	1671392	190	325664171
-M	m01689	1671583	742	2350645976
-M	m01690	1672326	453	3586626965
-M	m01691	1672780	198	1581336047
-M	m01692	1672979	14	559744056
-M	m01693	1672994	939	317275894
-M	m01694	1673934	1040	2316327459
-M	m01695	1674975	1029	3632618237
-M	m01696	1676005	617	2513426523
-M	m01697	1676623	309	2844356624
-M	m01698	1676933	1042	204949930
-M	m01699	1677976	870	1040843021
-M	m01700	1678847	49	1992756994
-M	m01701	1678897	186	1425424104
-M	m01702	1679084	452	4282884596
-M	m01703	1679537	90	2737970897
-M	m01704	1679628	823	2921009335
-M	m01705	1680452	105	3058443449
-M	m01706	1680558	815	4093513624
-M	m01707	1681374	18	978716168
-M	m01708	1681393	889	3551927236
-M	m01709	1682283	90	428547696
-M	m01710	1682374	22	1344276208
-M	m01711	1682397	82	4259323385
-M	m01712	1682480	356	1994422495
-M	m01713	1682837	428	4147610694
-M	m01714	1683266	895	66395327
-M	m01715	1684162	1002	1891652122
-M	m01716	1685165	89	97066555
-M	m01717	1685255	21	1181877884
-M	m01718	1685277	78	1189420067
-M	m01719	1685356	27	2232420633
-M	m01720	1685384	86	2060394385
-M	m01721	1685471	88	4112653840
-M	m01722	1685560	19	923272629
-M	m01723	1685580	998	887641387
-M	m01724	1686579	996	138697528
-M	m01725	1687576	351	186088144
-M	m01726	1687928	44	4007987697
-M	m01727	1687973	347	3979310101
-M	m01728	1688321	342	445476094
-M	m01729	1688664	27	1995311146
-M	m01730	1688692	373	3666902161
-M	m01731	1689066	471	3502677143
-M	m01732	1689538	44	1565593454
-M	m01733	1689583	735	2500854055
-M	m01734	1690319	490	655534358
-M	m01735	1690810	395	3334768045
-M	m01736	1691206	863	2966297695
-M	m01737	1692070	984	1696290937
-M	m01738	1693055	349	705264482
-M	m01739	1693405	361	978748796
-M	m01740	1693767	794	2011829197
-M	m01741	1694562	348	4044320634
-M	m01742	1694911	154	4053808486
-M	m01743	1695066	457	4079917654
-M	m01744	1695524	409	88770321
-M	m01745	1695934	101	4214366720
-M	m01746	1696036	760	1882064448
-M	m01747	1696797	183	1023687940
-M	m01748	1696981	677	225045544
-M	m01749	1697659	585	3983918990
-M	m01750	1698245	255	2634044444
-M	m01751	1698501	81	2435783748
-M	m01752	1698583	771	2551253835
-M	m01753	1699355	125	3533777866
-M	m01754	1699481	589	1050134075
-M	m01755	1700071	632	2611728963
-M	m01756	1700704	205	595149431
-M	m01757	1700910	91	3519684728
-M	m01758	1701002	761	2751592890
-M	m01759	1701764	222	2565227364
-M	m01760	1701987	32	2942896902
-M	m01761	1702020	7	162726496
-M	m01762	1702028	78	1231494053
-M	m01763	1702107	83	35790287
-M	m01764	1702191	113	2587436028
-M	m01765	1702305	255	999445723
-M	m01766	1702561	354	4106057551
-M	m01767	1702916	52	3350073403
-M	m01768	1702969	362	36010418
-M	m01769	1703332	205	3219605811
-M	m01770	1703538	16	769393934
-M	m01771	1703555	461	133798766
-M	m01772	1704017	42	1398214438
-M	m01773	1704060	74	2065831946
-M	m01774	1704135	126	41495387
-M	m01775	1704262	704	2820141884
-M	m01776	1704967	49	2971078950
-M	m01777	1705017	754	4209901370
-M	m01778	1705772	926	1456095670
-M	m01779	1706699	164	1215837178
-M	m01780	1706864	655	2479611553
-M	m01781	1707520	507	2831003323
-M	m01782	1708028	3	22479019
-M	m01783	1708032	193	930562644
-M	m01784	1708226	916	3708762702
-M	m01785	1709143	107	4092011661
-M	m01786	1709251	654	3663650941
-M	m01787	1709906	716	663483033
-M	m01788	1710623	57	1270223811
-M	m01789	1710681	739	2313026923
-M	m01790	1711421	904	336081068
-M	m01791	1712326	23	1535903629
-M	m01792	1712350	84	4017233294
-M	m01793	1712435	474	452632370
-M	m01794	1712910	924	4132583952
-M	m01795	1713835	158	1029715561
-M	m01796	1713994	642	3852390637
-M	m01797	1714637	903	1500004028
-M	m01798	1715541	130	3726257797
-M	m01799	1715672	328	1223454728
-M	m01800	1716001	227	1602834508
-M	m01801	1716229	906	790113785
-M	m01802	1717136	896	3641587382
-M	m01803	1718033	656	1806362921
-M	m01804	1718690	598	216188853
-M	m01805	1719289	16	585106499
-M	m01806	1719306	882	3560975655
-M	m01807	1720189	146	2736468765
-M	m01808	1720336	640	75617054
-M	m01809	1720977	919	3089509812
-M	m01810	1721897	875	3343132810
-M	m01811	1722773	874	2697471124
-M	m01812	1723648	21	1340082007
-M	m01813	1723670	749	1622080719
-M	m01814	1724420	334	3154997404
-M	m01815	1724755	426	2682424339
-M	m01816	1725182	152	2010459530
-M	m01817	1725335	30	2867792500
-M	m01818	1725366	12	467600456
-M	m01819	1725379	600	3802252766
-M	m01820	1725980	631	603641161
-M	m01821	1726612	103	2091721647
-M	m01822	1726716	855	1835081240
-M	m01823	1727572	118	946742696
-M	m01824	1727691	601	1590019732
-M	m01825	1728293	853	2137007437
-M	m01826	1729147	832	4250214876
-M	m01827	1729980	79	1634081785
-M	m01828	1730060	664	3294947016
-M	m01829	1730725	831	2824475949
-M	m01830	1731557	658	3461667574
-M	m01831	1732216	34	3455192067
-M	m01832	1732251	611	2143082501
-M	m01833	1732863	95	1011294302
-M	m01834	1732959	632	1671550762
-M	m01835	1733592	465	1757715267
-M	m01836	1734058	243	2855358814
-M	m01837	1734302	618	3446724676
-M	m01838	1734921	657	1650512102
-M	m01839	1735579	185	4115873568
-M	m01840	1735765	220	3401140575
-M	m01841	1735986	81	2212371464
-M	m01842	1736068	99	3966247024
-M	m01843	1736168	416	1812827925
-M	m01844	1736585	805	440732705
-M	m01845	1737391	705	4107989237
-M	m01846	1738097	11	366347219
-M	m01847	1738109	43	1239879203
-M	m01848	1738153	158	1470445029
-M	m01849	1738312	44	1835536363
-M	m01850	1738357	107	1217603094
-M	m01851	1738465	74	2474383505
-M	m01852	1738540	631	4130263787
-M	m01853	1739172	805	3823835612
-M	m01854	1739978	464	3739066522
-M	m01855	1740443	384	1313111466
-M	m01856	1740828	98	1975093
-M	m01857	1740927	317	1328639362
-M	m01858	1741245	102	1214325808
-M	m01859	1741348	172	3224582558
-M	m01860	1741521	525	2912067391
-M	m01861	1742047	795	4167173951
-M	m01862	1742843	499	1362994084
-M	m01863	1743343	61	2719552856
-M	m01864	1743405	778	2126777348
-M	m01865	1744184	637	791402744
-M	m01866	1744822	50	3271102869
-M	m01867	1744873	188	2505457370
-M	m01868	1745062	78	4170652009
-M	m01869	1745141	32	2959411743
-M	m01870	1745174	90	2597199459
-M	m01871	1745265	587	1366146907
-M	m01872	1745853	784	999624253
-M	m01873	1746638	773	535169811
-M	m01874	1747412	21	1156122056
-M	m01875	1747434	102	2448303309
-M	m01876	1747537	766	2786656331
-M	m01877	1748304	757	973339692
-M	m01878	1749062	79	1517362136
-M	m01879	1749142	577	1945223075
-M	m01880	1749720	32	3261664141
-M	m01881	1749753	469	3120799926
-M	m01882	1750223	87	2012550013
-M	m01883	1750311	187	475087325
-M	m01884	1750499	734	2877092942
-M	m01885	1751234	72	2637043987
-M	m01886	1751307	322	3322571835
-M	m01887	1751630	138	634465327
-M	m01888	1751769	727	468711202
-M	m01889	1752497	17	826606908
-M	m01890	1752515	509	2968366330
-M	m01891	1753025	714	2165176565
-M	m01892	1753740	13	370017087
-M	m01893	1753754	22	1468270480
-M	m01894	1753777	208	3070768047
-M	m01895	1753986	253	3818739640
-M	m01896	1754240	20	1212810981
-M	m01897	1754261	591	3176643169
-M	m01898	1754853	577	2992031311
-M	m01899	1755431	92	3671138059
-M	m01900	1755524	107	185409854
-M	m01901	1755632	288	1095656580
-M	m01902	1755921	563	2206777093
-M	m01903	1756485	515	996715662
-M	m01904	1757001	421	32214943
-M	m01905	1757423	181	2974891050
-M	m01906	1757605	743	3158494301
-M	m01907	1758349	718	1868357460
-M	m01908	1759068	27	1908344760
-M	m01909	1759096	686	3547128070
-M	m01910	1759783	234	1804226697
-M	m01911	1760018	350	836664548
-M	m01912	1760369	83	3529907445
-M	m01913	1760453	504	2447288194
-M	m01914	1760958	680	1229186835
-M	m01915	1761639	310	288254353
-M	m01916	1761950	64	3693483557
-M	m01917	1762015	10	281674486
-M	m01918	1762026	379	2479718546
-M	m01919	1762406	504	2161485695
-M	m01920	1762911	668	560524717
-M	m01921	1763580	84	4026801458
-M	m01922	1763665	482	614900726
-M	m01923	1764148	339	424045652
-M	m01924	1764488	53	4048753058
-M	m01925	1764542	54	573838303
-M	m01926	1764597	106	3520995815
-M	m01927	1764704	266	1030838224
-M	m01928	1764971	648	4261468309
-M	m01929	1765620	644	2130696702
-M	m01930	1766265	29	2553350724
-M	m01931	1766295	506	2145692681
-M	m01932	1766802	164	838022696
-M	m01933	1766967	35	3541699445
-M	m01934	1767003	34	3577809703
-M	m01935	1767038	34	2180974667
-M	m01936	1767073	218	2285521776
-M	m01937	1767292	182	3414441811
-M	m01938	1767475	98	2889163138
-M	m01939	1767574	445	1999017059
-M	m01940	1768020	478	3085214678
-M	m01941	1768499	635	4267235235
-M	m01942	1769135	154	2375366284
-M	m01943	1769290	368	1802797410
-M	m01944	1769659	43	1369313157
-M	m01945	1769703	224	2372619620
-M	m01946	1769928	219	4037102377
-M	m01947	1770148	107	1335042354
-M	m01948	1770256	96	979509317
-M	m01949	1770353	92	3457031995
-M	m01950	1770446	416	2053997992
-M	m01951	1770863	102	869606054
-M	m01952	1770966	415	1099991297
-M	m01953	1771382	610	80726299
-M	m01954	1771993	508	1106421717
-M	m01955	1772502	604	1667223557
-M	m01956	1773107	121	4275906398
-M	m01957	1773229	189	2851880410
-M	m01958	1773419	141	1323576960
-M	m01959	1773561	359	3950934378
-M	m01960	1773921	200	3784328145
-M	m01961	1774122	208	701514871
-M	m01962	1774331	300	2797890017
-M	m01963	1774632	182	1275412205
-M	m01964	1774815	436	3734803144
-M	m01965	1775252	91	4000653612
-M	m01966	1775344	295	2157799042
-M	m01967	1775640	34	1889535589
-M	m01968	1775675	482	3001066911
-M	m01969	1776158	584	2467087103
-M	m01970	1776743	420	680430485
-M	m01971	1777164	587	2133898842
-M	m01972	1777752	298	1292985282
-M	m01973	1778051	173	145569863
-M	m01974	1778225	23	1249511089
-M	m01975	1778249	84	3916045545
-M	m01976	1778334	374	1001880156
-M	m01977	1778709	45	722668920
-M	m01978	1778755	263	4070856330
-M	m01979	1779019	564	2774515761
-M	m01980	1779584	71	2203326651
-M	m01981	1779656	381	1614447458
-M	m01982	1780038	80	1993939831
-M	m01983	1780119	203	1663319783
-M	m01984	1780323	78	136976891
-M	m01985	1780402	373	2740550362
-M	m01986	1780776	113	2301371516
-M	m01987	1780890	335	129265232
-M	m01988	1781226	372	64256725
-M	m01989	1781599	562	642762069
-M	m01990	1782162	533	14922706
-M	m01991	1782696	529	1927917336
-M	m01992	1783226	521	1825944164
-M	m01993	1783748	161	2980132456
-M	m01994	1783910	82	2933529619
-M	m01995	1783993	338	1462333598
-M	m01996	1784332	332	4232932810
-M	m01997	1784665	161	2955818596
-M	m01998	1784827	10	158073268
-M	m01999	1784838	10	160170424
-M	m02000	1784849	60	718017118
-M	m02001	1784910	207	2396931827
-M	m02002	1785118	84	4042661257
-M	m02003	1785203	322	2807327168
-M	m02004	1785526	500	1566680816
-M	m02005	1786027	498	374058812
-M	m02006	1786526	102	506733045
-M	m02007	1786629	305	3653788495
-M	m02008	1786935	324	3793054418
-M	m02009	1787260	513	93168901
-M	m02010	1787774	376	2779282096
-M	m02011	1788151	480	1053664874
-M	m02012	1788632	49	2910785681
-M	m02013	1788682	4	27590821
-M	m02014	1788687	339	2690674277
-M	m02015	1789027	234	3450884318
-M	m02016	1789262	467	4193360459
-M	m02017	1789730	36	3921939524
-M	m02018	1789767	309	1375628091
-M	m02019	1790077	223	1978617453
-M	m02020	1790301	123	3426297933
-M	m02021	1790425	461	1747361371
-M	m02022	1790887	455	3652362214
-M	m02023	1791343	448	3479672982
-M	m02024	1791792	43	1153830467
-M	m02025	1791836	304	1259038815
-M	m02026	1792141	445	1620743925
-M	m02027	1792587	90	2632785524
-M	m02028	1792678	83	1377769990
-M	m02029	1792762	49	2639990780
-M	m02030	1792812	92	3802931034
-M	m02031	1792905	247	23023212
-M	m02032	1793153	57	1376392271
-M	m02033	1793211	278	472931381
-M	m02034	1793490	31	2921532118
-M	m02035	1793522	300	1799644118
-M	m02036	1793823	431	598575018
-M	m02037	1794255	80	1898060597
-M	m02038	1794336	409	4206791878
-M	m02039	1794746	408	2020969042
-M	m02040	1795155	235	1494568972
-M	m02041	1795391	65	4057142867
-M	m02042	1795457	227	891310036
-M	m02043	1795685	399	2267645946
-M	m02044	1796085	220	3453045628
-M	m02045	1796306	227	4288760714
-M	m02046	1796534	91	1368923586
-M	m02047	1796626	204	180307021
-M	m02048	1796831	102	3695649397
-M	m02049	1796934	102	3708494455
-M	m02050	1797037	102	3682673267
-M	m02051	1797140	102	3721601657
-M	m02052	1797243	101	3395363400
-M	m02053	1797345	32	3049130786
-M	m02054	1797378	9	214499935
-M	m02055	1797388	157	4274270886
-M	m02056	1797546	3	15663223
-M	m02057	1797550	98	2415010226
-M	m02058	1797649	208	2710063201
-M	m02059	1797858	388	1705803948
-M	m02060	1798247	74	3630242315
-M	m02061	1798322	203	886587872
-M	m02062	1798526	197	3059565909
-M	m02063	1798724	197	2265466089
-M	m02064	1798922	371	3268771823
-M	m02065	1799294	247	3010942740
-M	m02066	1799542	329	332820970
-M	m02067	1799872	21	1147733682
-M	m02068	1799894	15	490406843
-M	m02069	1799910	19	997197379
-M	m02070	1799930	13	383517516
-M	m02071	1799944	324	2432987121
-M	m02072	1800269	146	3201249255
-M	m02073	1800416	130	3905104503
-M	m02074	1800547	124	4127795342
-M	m02075	1800672	149	4224463653
-M	m02076	1800822	271	634673488
-M	m02077	1801094	263	2974374728
-M	m02078	1801358	135	915679979
-M	m02079	1801494	37	3611101824
-M	m02080	1801532	251	73553484
-M	m02081	1801784	128	3207801662
-M	m02082	1801913	127	2761304848
-M	m02083	1802041	28	2139818135
-M	m02084	1802070	127	2761239312
-M	m02085	1802198	125	1952918189
-M	m02086	1802324	25	1835993097
-M	m02087	1802350	124	1449536117
-M	m02088	1802475	23	1567360934
-M	m02089	1802499	229	4107817252
-M	m02090	1802729	122	538716690
-M	m02091	1802852	97	369762172
-M	m02092	1802950	87	239869382
-M	m02093	1803038	175	3544136718
-m00002%3A0%3A20421
+B	capture-active-rwd007-portrait-win.jsx	10839	133	1791499314	capture-inspection-frame.jsx	821590060
+B	capture-ad-reference-levels.jsx	10973	17	568329107	capture-inspection-frame.jsx	2472460385
+B	capture-balloon-cut.jsx	10991	54	1137183643	capture-inspection-frame.jsx	24698361
+B	capture-before-33s.jsx	11046	35	2298152822		3791557304
+B	capture-combo-onsets.jsx	11082	35	2289436531	capture-inspection-frame.jsx	2941217113
+B	capture-comp1-gate-plugin-check.jsx	11118	35	2283210594	capture-inspection-frame.jsx	1052859468
+B	capture-comp1-my-library-arrow.jsx	11154	53	861277003	capture-inspection-frame.jsx	993287237
+B	capture-comp1-my-library-bridge.jsx	11208	35	2294548335	capture-inspection-frame.jsx	2187620102
+B	capture-comp1-my-library-completion.jsx	11244	35	2288977771	capture-inspection-frame.jsx	2332384378
+B	capture-comp1-my-library-portal-final.jsx	11280	53	875432784	capture-inspection-frame.jsx	632576449
+B	capture-comp1-outro-3s-final.jsx	11334	35	2284652388	capture-inspection-frame.jsx	1052793932
+B	capture-comp1-prearrival-arrow.jsx	11370	35	2295662451	capture-inspection-frame.jsx	2353027416
+B	capture-comp1-prearrival-bridge.jsx	11406	35	2293106537	capture-inspection-frame.jsx	582506939
+B	capture-comp1-prearrival-portal.jsx	11442	69	103747246	capture-inspection-frame.jsx	599415229
+B	capture-comp1-prearrival-purple-gate.jsx	11512	35	2291730280	capture-inspection-frame.jsx	1903712755
+B	capture-comp1-smooth-outro-transition.jsx	11548	53	870779728	capture-inspection-frame.jsx	385244718
+B	capture-complete-crossing-proof.jsx	11602	232	2038116649		3244651355
+B	capture-continuous-player-tracks.jsx	11835	156	560996583		3122595021
+B	capture-current-gate-perspective.jsx	11992	56	1471876070	capture-inspection-frame.jsx	916574789
+B	capture-dash-15s-portrait-celebration.jsx	12049	74	1424428977	capture-inspection-frame.jsx	2571934787
+B	capture-dash-15s-portrait-outro.jsx	12124	54	1088621429	capture-inspection-frame.jsx	2572328003
+B	capture-dash-15s-portrait-portal.jsx	12179	72	880742225	capture-inspection-frame.jsx	2539559999
+B	capture-dash-15s-wide-before-outro.jsx	12252	16	505217896	capture-inspection-frame.jsx	3691289885
+B	capture-dash-15s-wide-celebration.jsx	12269	53	903088985	capture-inspection-frame.jsx	2544671809
+B	capture-dash-15s-wide-completion.jsx	12323	53	903744346	capture-inspection-frame.jsx	2512034877
+B	capture-dash-15s-wide-outro.jsx	12377	53	904399707	capture-inspection-frame.jsx	2561186883
+B	capture-dash-source-before-wide.jsx	12431	16	505611104	capture-inspection-frame.jsx	137146802
+B	capture-dash-wide-arrow.jsx	12448	72	874254157	capture-inspection-frame.jsx	1594924163
+B	capture-dash-wide-outro.jsx	12521	91	2136544079	capture-inspection-frame.jsx	4043152572
+B	capture-dash-wide-overview.jsx	12613	54	1082264436	capture-inspection-frame.jsx	190094617
+B	capture-dash-wide-portal.jsx	12668	72	869928778	capture-inspection-frame.jsx	2095291624
+B	capture-final-short-crossing.jsx	12741	128	3727235886		1654526472
+B	capture-final-square-hand-examples.jsx	12870	73	1074401150		2904706757
+B	capture-inspection-frame.jsx	12944	60	2254179488		1328033951
+B	capture-knife-miss-vfx.jsx	13005	72	983240564	capture-inspection-frame.jsx	1964894333
+B	capture-landscape-before.jsx	13078	95	3460043828	capture-inspection-frame.jsx	1336135161
+B	capture-landscape-miss-placement.jsx	13174	132	1358633987	capture-inspection-frame.jsx	2657332450
+B	capture-landscape-wall-and-jump-check.jsx	13307	96	3758625885	capture-inspection-frame.jsx	2430141528
+B	capture-level-action-times.jsx	13404	54	1067191157	capture-inspection-frame.jsx	4070905498
+B	capture-miss-cue-positions.jsx	13459	57	1673595936	capture-inspection-frame.jsx	1115702020
+B	capture-miss-reference-details.jsx	13517	96	3732870219	capture-inspection-frame.jsx	160563412
+B	capture-movie002-later-springs.jsx	13614	57	1674447898	capture-inspection-frame.jsx	4110266279
+B	capture-movie002-spring-reference.jsx	13672	95	3524334651	capture-inspection-frame.jsx	989825144
+B	capture-outlined-small-hand-examples.jsx	13768	111	758912918		4172227234
+B	capture-outro-brand-review.jsx	13880	35	2271414117	capture-inspection-frame.jsx	1315521948
+B	capture-pickle-motion-samples.jsx	13916	17	575865759	capture-inspection-frame.jsx	1991684945
+B	capture-player-hand-route-review.jsx	13934	55	1259277237		1394194611
+B	capture-pro-combo-review.jsx	13990	73	1130434430	capture-inspection-frame.jsx	1018380279
+B	capture-pro-entry-mask.jsx	14064	93	2775585732	capture-inspection-frame.jsx	2298950508
+B	capture-pro-mask-review.jsx	14158	74	1334513582	capture-inspection-frame.jsx	2020227373
+B	capture-reference-15-17-detail.jsx	14233	96	3811316838	capture-inspection-frame.jsx	3225546165
+B	capture-reference-pickle-15-18.jsx	14330	56	1447103456	capture-inspection-frame.jsx	487162662
+B	capture-refined-first45-contacts.jsx	14387	192	1494165676		1565069581
+B	capture-rtfx-energy006-source.jsx	14580	37	2551252957	capture-inspection-frame.jsx	3900153667
+B	capture-rwd007-corrected-tight-clicks.jsx	14618	111	720967552	capture-inspection-frame.jsx	838430843
+B	capture-rwd007-hand-planning.jsx	14730	171	1169630290	capture-inspection-frame.jsx	3674708527
+B	capture-rwd007-portal-asmr-plan.jsx	14902	170	454042639	capture-inspection-frame.jsx	3171962333
+B	capture-rwd007-praise-candidate-events.jsx	15073	55	1266355115	capture-inspection-frame.jsx	508488787
+B	capture-rwd007-praise-onset-frames.jsx	15129	113	1637160950	capture-inspection-frame.jsx	2043734390
+B	capture-rwd007-refined-choice-frames.jsx	15243	131	734469040		3234943103
+B	capture-rwd007-route-clean-reference.jsx	15375	35	2279933813		903276199
+B	capture-rwd007-rtfx-epic-portrait15.jsx	15411	37	2571634661	capture-inspection-frame.jsx	1670694741
+B	capture-rwd007-rtfx-epic-wide-peak.jsx	15449	75	1765871635	capture-inspection-frame.jsx	3261974293
+B	capture-rwd007-rtfx-epic-wide.jsx	15525	94	3289060385	capture-inspection-frame.jsx	3326723865
+B	capture-rwd007-rtfx-perfect-portrait.jsx	15620	37	2576222187	capture-inspection-frame.jsx	1841547502
+B	capture-rwd007-rtfx-perfect-wide15.jsx	15658	16	514720625	capture-inspection-frame.jsx	3991456026
+B	capture-rwd007-train-timing-probes.jsx	15675	93	2852852676	capture-inspection-frame.jsx	3855176923
+B	capture-rwd008-mode-titles-before.jsx	15769	113	1591351306		2075282278
+B	capture-train-head-tap-samples.jsx	15883	113	1502484453		4014453024
+B	capture-upper-gate-crossings.jsx	15997	206	3202034633	capture-inspection-frame.jsx	2662692178
+B	capture-vd007-background-hold.jsx	16204	16	517997435	capture-inspection-frame.jsx	3561777893
+B	capture-vd057-combo-180.jsx	16221	171	1243292758	capture-inspection-frame.jsx	1334152909
+B	capture-vd057-end-before-edit.jsx	16393	131	839261115	capture-inspection-frame.jsx	3616210038
+B	capture-vd057-landscape-preflight.jsx	16525	169	4285473776	capture-inspection-frame.jsx	1506756193
+B	capture-vd057-last-gameplay-check.jsx	16695	150	1785274302	capture-inspection-frame.jsx	3297246318
+B	capture-vd057-portal-reference.jsx	16846	192	1860380860	capture-inspection-frame.jsx	3546483269
+B	capture-vd057-praise-180.jsx	17039	171	1244406874	capture-inspection-frame.jsx	1386516755
+B	capture-vd057-unstoppable-180.jsx	17211	171	1245193310	capture-inspection-frame.jsx	3532165332
+B	capture-vd057-wide-hand-check.jsx	17383	172	1872766108	capture-inspection-frame.jsx	1132241224
+B	capture-vd057-win130-full-dim.jsx	17556	171	1249256539	capture-inspection-frame.jsx	732663562
+B	capture-wide-wall-reference-fixed.jsx	17728	54	1037896551	capture-inspection-frame.jsx	4242385950
+B	capture-wide-wall-reference.jsx	17783	72	820318018	capture-inspection-frame.jsx	3704792627
+B	catalog-installed-plugins.jsx	17856	17	565052308		3545335397
+B	center-enlarge-vd057-wide-combo-180.jsx	17874	227	2882023558		1918783938
+B	center-enlarge-vd057-wide-praise-180.jsx	18102	115	2537035899		3735968049
+B	center-enlarge-vd057-wide-unstoppable-180.jsx	18218	228	3735040193		3573176262
+B	center-game3-hand.jsx	18447	57	1661471775		1824304206
+B	center-portrait-versus.jsx	18505	172	1206199355		645794087
+B	center-reference-leg-attachments.jsx	18678	173	2080974006		993447168
+B	center-vd057-wide-combo-text.jsx	18852	99	433198294	capture-inspection-frame.jsx	3551143558
+B	check-bridge-upgrade-source.jsx	18952	16	512885618	Codex Bridge.jsx	468021838
+B	check-comp1-target-for-arrow-blink.jsx	18969	16	504628067		3002512442
+B	check-core-users-first45.jsx	18986	16	509281132		348482125
+B	check-hand-vector-components.jsx	19003	16	514786163		441649931
+B	check-library-connection.jsx	19020	16	516096892	Codex Library.jsx	3855448674
+B	clean-comp1-bridge-border-verify-recut.jsx	19037	17	573178784		3384966078
+B	clone-vd008-wide-v2.jsx	19055	17	565314454		1652903331
+B	comp1-add-animation-composer-my-library-accents.jsx	19073	57	1633815554		1085600251
+B	comp1-all-elements-single-teleport-pan-30s.jsx	19131	101	1116345686		3425447155
+B	comp1-arrow-symbol-only-no-hex-blink.jsx	19233	55	1259670433		3311601773
+B	comp1-continuous-30s-centered-smooth-zoom.jsx	19289	360	3032697830		2857265185
+B	comp1-final-clean-completion-and-library-arrow.jsx	19650	96	3791983702		1095445914
+B	comp1-finish-celebration-smooth-outro-3s.jsx	19747	196	123873673		435051133
+B	comp1-finish-my-library-accent-visibility.jsx	19944	95	3389395982		3464794765
+B	comp1-first-intro-only-before-train-arrives.jsx	20040	461	4179059025		240089905
+B	comp1-magenta-arrow-symbol-blink.jsx	20502	57	1628769282		1212620208
+B	comp1-remove-only-purple-completion-freeze.jsx	20560	156	994517305		299040944
+B	comp1-repair-prearrival-intros-preserve-remap.jsx	20717	403	710890749		4032228652
+B	comp1-rotating-arrow-glyph-blink.jsx	21121	158	1821188457		2838290992
+B	comp1-strong-clean-plugin-function-highlights.jsx	21280	156	658317563		3866158492
+B	complete-9x17-to-16x9.jsx	21437	17	572130209		3774885247
+B	complete-cartoon-combo-application.jsx	21455	235	337916408		2549261627
+B	complete-comp1-continuous-30s-centered-zoom.jsx	21691	322	4163126233		627412173
+B	complete-knife-miss-vfx.jsx	22014	347	188631422		3424821121
+B	complete-landscape-outro-fixed.jsx	22362	17	562496411		1185990852
+B	complete-portrait-15s-warning-final.jsx	22380	189	4090636312		3164390192
+B	complete-rounded-cartoon-combo-art.jsx	22570	74	1339232170		49425799
+B	complete-rtfx-epic-perfect-highlights.jsx	22645	17	563282836		3687404258
+B	complete-short-miss-edits.jsx	22663	117	3208059062		1046754463
+B	complete-soft-gameplay-flashes.jsx	22781	78	2348945497		1714670606
+B	complete-user-9x17-16x10-15s-recut.jsx	22860	17	572982181		3000766032
+B	complete-vd057-full-tray-praise.jsx	22878	543	419656411		609270164
+B	configure-native-suction-effects.jsx	23422	235	4143329705		151097282
+B	continuous-hand-press-direction-squares.jsx	23658	36	2404452257		1502213059
+B	correct-matched-game-walls.jsx	23695	138	4209581368		3169106317
+B	create-cartoon-2d-suction-vortex.jsx	23834	96	3873248374		2474847593
+B	create-clean-background-9x16.jsx	23931	76	1827737601		59820738
+B	create-comp-123.jsx	24008	17	574096287		4178512936
+B	create-grow-fx-dual-format.jsx	24026	18	632292301		96661742
+B	create-knife-compress-stretch-9x16.jsx	24045	177	4251985207		13901195
+B	create-loading-bar.jsx	24223	18	624034763		1034715554
+B	create-movie005-native-wide-precomp-and-connect.jsx	24242	179	1336944058		4037435256
+B	create-separated-pickle-vector.jsx	24422	17	567411614		3578714849
+B	create-trampoline-vector.jsx	24440	17	570360739		4001135558
+B	create-two-pickle-taunt-variants.jsx	24458	2334	395962869		1612137695
+B	create-wide-level-comps-with-walls.jsx	26793	17	573113254		2211199888
+B	delete-replaced-vector-hands.jsx	26811	35	2317223815		2157908972
+B	detect-gameplay-wrong-taps.jsx	26847	36	2414741414		199030573
+B	diagnose-black-without-vignette.jsx	26884	132	1313479682		503213641
+B	emphasize-pickle-teasing.jsx	27017	56	1460407264		3288171369
+B	emphasize-play-cta.jsx	27074	36	2412840873		3251008988
+B	enable-vd057-wide-background.jsx	27111	54	1093995392		1877735026
+B	enhance-rwd008-mode-titles-and-voices.jsx	27166	99	366089414		4271196245
+B	enlarge-dash-wide-gameplay-overview.jsx	27266	99	517018873		1689506673
+B	enlarge-vd057-wide-hand-130.jsx	27366	76	1953042462	capture-inspection-frame.jsx	1736662245
+B	ensure-pro-wrong-audio.jsx	27443	154	3902742679		3746925443
+B	expand-bones-source-canvas.jsx	27598	255	512505345		1690515526
+B	export-dash2-timing-template.jsx	27854	17	569574303		2701327953
+B	export-rwd007-clarity-audio.jsx	27872	215	999828824		2149058244
+B	extend-pro-source-canvas.jsx	28088	73	1096486785		430279697
+B	fake-rwd007-clean-final-train-route.jsx	28162	36	2421229479		3695840105
+B	fill-portrait-dash2-pan-edge.jsx	28199	56	1454574556		1096772835
+B	finalize-praise-sfx-trims.jsx	28256	155	117907654		3593176319
+B	finalize-two-pickle-bones-variants.jsx	28412	36	2395932560		2550974556
+B	finalize-vd057-hand-sfx-transfer.jsx	28449	78	2421756018		1543503575
+B	finalize-wide-camera.jsx	28528	56	1470696414		2626825539
+B	find-reference-footage.jsx	28585	16	512099185		3698405501
+B	find-requested-hand-image.jsx	28602	53	903809884		1687523926
+B	finish-15s-user-targets.jsx	28656	137	3547536616		3486865720
+B	finish-ad45-in-9x16.jsx	28794	541	844395076		3122435099
+B	finish-cartoon-lid-blinks.jsx	29336	95	3495892003		3860496968
+B	finish-cartoon-suction-inputs.jsx	29432	158	1817583959		1333037269
+B	finish-centered-reference-legs.jsx	29591	135	2630229124		225562159
+B	finish-comp1-rotating-arrow-blink.jsx	29727	137	3611106551		1660555207
+B	finish-dash-outro-42s-remap.jsx	29865	17	570819483		1716052893
+B	finish-front-hands-cartoon-joints.jsx	29883	217	2293181878		2335309382
+B	finish-knife-compress-stretch-9x16.jsx	30101	863	3658397238		905434000
+B	finish-landscape-15s-user-target.jsx	30965	58	1880689745		3533408960
+B	finish-landscape-edit-via-transfer-comp.jsx	31024	178	692266381		1819745898
+B	finish-landscape-reversed-clips-and-cuts.jsx	31203	153	3323797592		605451565
+B	finish-original-first45-both.jsx	31357	281	2846309145		1523408786
+B	finish-portal-wind-at-12s.jsx	31639	118	3566213363	capture-inspection-frame.jsx	3366957488
+B	finish-portrait-15s-warning.jsx	31758	58	1827867707		3109015642
+B	finish-reference-taunt-captions.jsx	31817	95	3397260315		19060782
+B	finish-reference-tongue-detail.jsx	31913	94	3151500284	capture-inspection-frame.jsx	765490158
+B	finish-rwd007-fast-title-sweep.jsx	32008	196	20195717	capture-inspection-frame.jsx	68603532
+B	finish-square-arm-clearance.jsx	32205	75	1631391726		968682964
+B	finish-square-card-background.jsx	32281	35	2308310909		4200152110
+B	finish-train-head-click-ring.jsx	32317	57	1637092355		1406529702
+B	finish-two-pickle-taunt-variants.jsx	32375	18	624821194		4274144780
+B	finish-wide-comparison.jsx	32394	75	1657147380		3931447566
+B	fit-card-comps-to-shapes.jsx	32470	97	4146926746		3380396528
+B	fit-upper-gate-rectangular-portal.jsx	32568	98	181736653		1759011764
+B	fix-all-background-green-match.jsx	32667	17	566166427		3211591732
+B	fix-bones-mesh-extents.jsx	32685	92	2520454036		3735153581
+B	fix-cohesive-text-outros.jsx	32778	116	2817988753		3823732348
+B	fix-comp1-broken-pixel-edge-fx.jsx	32895	98	200479946		2275957026
+B	fix-comp1-zoom-edge-fill.jsx	32994	56	1487145964		2528887893
+B	fix-current-pro-panel-masks.jsx	33051	76	1876824078		2785446854
+B	fix-duplicated-knife-controller.jsx	33128	57	1658194963		2230498961
+B	fix-easy-continuity-both-15s.jsx	33186	156	963191067		3983120978
+B	fix-game3-border-on-zoom.jsx	33343	57	1623460879		374565908
+B	fix-gate-facing-vortex-perspective.jsx	33401	118	3538426106		3298074793
+B	fix-headline-gradient-coordinates.jsx	33520	54	1107561355		1778023740
+B	fix-landscape-balloon-cut-position.jsx	33575	17	571474836		175037562
+B	fix-landscape-trampoline-contact-keys.jsx	33593	75	1551372235		2494109806
+B	fix-normal-continuity-both-15s.jsx	33669	118	3555596525		3726790453
+B	fix-outro-cta-hierarchy.jsx	33788	36	2405369751		1416515240
+B	fix-pickle-eye-stack.jsx	33825	54	1086393216		2549107060
+B	fix-pickle-lid-white-fringe.jsx	33880	57	1616317442		1817455883
+B	fix-pickle-vector-detail-order.jsx	33938	35	2278688621		603150923
+B	fix-reference-pickle-hip-overlap.jsx	33974	136	3189120178		982586982
+B	fix-rwd007-choice-clicks.jsx	34111	180	2119050754		2745055462
+B	fix-rwd007-click-next-control-before-train-leaves.jsx	34292	239	3249222274		4162491257
+B	fix-rwd007-hand-wait-before-train.jsx	34532	17	565183379		607256265
+B	fix-rwd007-outro-over-level-complete.jsx	34550	76	1944457263		1771678174
+B	fix-rwd007-tap-only-hand.jsx	34627	411	315643644		413107957
+B	fix-rwd007-tap-ring-frame-boundary.jsx	35039	36	2414610338		3392469830
+B	fix-rwd007-visible-click-before-departure.jsx	35076	261	1364932385		3461227692
+B	fix-rwd007-win-dim-full-frame.jsx	35338	36	2417231776		65056312
+B	fix-selector-game3-target.jsx	35375	74	1302859671		2984712442
+B	fix-square-arm-masks.jsx	35450	76	1893797919		2358257747
+B	fix-square-noob-arm.jsx	35527	213	3736677649		2690285098
+B	fix-toy-vortex-rim-perspective.jsx	35741	56	1486490610		1735357345
+B	fix-vd007-wide-background-hold.jsx	35798	17	577504163		669532327
+B	fix-vd057-hand-orange-tiles.jsx	35816	56	1484721132		4221452064
+B	fix-vd057-wide-dim-time.jsx	35873	95	3557102651		2606880349
+B	fix-vd057-wide-hand-follow-gameplay.jsx	35969	57	1675103257		3556871005
+B	fix-vd057-win130-full-dim.jsx	36027	75	1676087273		622318234
+B	fix-wall-level-priority.jsx	36103	56	1458047971		1974669523
+B	fix-wide-background-remap-coverage.jsx	36160	56	1473842155		3206112392
+B	fix-wide-native-background-dash2.jsx	36217	78	2405634162		2884193972
+B	flash-game-frames-on-wrong-taps.jsx	36296	152	2894536766		4227036464
+B	fullhd-cards-click-zoom.jsx	36449	58	1888291925		2297467785
+B	gap-other-versus-dividers.jsx	36508	115	2320177244		1690173702
+B	gap-square-versus-divider.jsx	36624	93	2716341167		99226058
+B	gradient-prove-outro.jsx	36718	76	1824788472		3549151640
+B	hello.jsx	36795	16	506397545		3134838659
+B	hold-final-all-kill.jsx	36812	53	927665000		801030932
+B	hold-rwd007-final-cyan-grid.jsx	36866	56	1463225304		2892844590
+B	import-comp1-composer-my-library-templates.jsx	36923	17	568722333		3921003160
+B	import-rtfx-energy-for-combo-highlights.jsx	36941	36	2385381260		3684809860
+B	improve-rwd007-hand-and-sound-clarity.jsx	36978	141	1149181368		2421191089
+B	inspect-15s-user-targets.jsx	37120	54	1107299216		3206734439
+B	inspect-active-background-contrast.jsx	37175	76	1908346905	capture-inspection-frame.jsx	2341800861
+B	inspect-active-comp.jsx	37252	58	1851657292		4171835288
+B	inspect-active-rwd007-structure.jsx	37311	57	1644301324		3281962598
+B	inspect-ad45-music.jsx	37369	55	1331104716		3385733844
+B	inspect-all-gameplay-hand-targets.jsx	37425	17	575407008		896160447
+B	inspect-all-knife-click-targets.jsx	37443	16	514982771		3885441173
+B	inspect-all-praise-frames.jsx	37460	73	1128664984	capture-inspection-frame.jsx	253811376
+B	inspect-balloon-jump.jsx	37534	56	1428425677		2397273458
+B	inspect-black-flash-sources.jsx	37591	57	1634601998		1331379711
+B	inspect-bones-anchors.jsx	37649	16	516490100		1485187661
+B	inspect-bones-effect-schema.jsx	37666	16	513737585		3996726995
+B	inspect-bones-rig-values.jsx	37683	16	509412208		641288750
+B	inspect-both-reference-camera.jsx	37700	54	1107692429		2424695890
+B	inspect-bridge-install.jsx	37755	94	3138851816		3903831272
+B	inspect-caption-font-weight.jsx	37850	55	1255279525		3642603142
+B	inspect-card-bounds.jsx	37906	55	1291979707		1710882028
+B	inspect-card3-matte.jsx	37962	16	503120737		3042356910
+B	inspect-cartoon-application-state.jsx	37979	16	518128497		214525530
+B	inspect-cartoon-difficulty-comps.jsx	37996	36	2406352795		2835161265
+B	inspect-click-knife-source.jsx	38033	73	1118506856		2843458954
+B	inspect-click06-position.jsx	38107	54	1048382322		3555967986
+B	inspect-combo-assets.jsx	38162	16	510002030		380790955
+B	inspect-combo-plugin-and-voice-trims.jsx	38179	34	2193819478		3832256441
+B	inspect-combo-x8-recolor.jsx	38214	75	1681592301		3807836577
+B	inspect-comp1-arrow-arrival-cue.jsx	38290	54	1115294609		2688763968
+B	inspect-comp1-completion-edge-mask.jsx	38345	55	1291848639		386914547
+B	inspect-comp1-completion-freeze-current.jsx	38401	93	2737181622		97990716
+B	inspect-comp1-continuous-edit-plugins.jsx	38495	54	1118505876		566653922
+B	inspect-comp1-element-vfx-current.jsx	38550	55	1251347377		3846416647
+B	inspect-comp1-element-vfx.jsx	38606	35	2304444281		1343530434
+B	inspect-comp1-footage-keys.jsx	38642	56	1459882972		3178818583
+B	inspect-comp1-missing-yellow-gate.jsx	38699	54	1120537496		190435975
+B	inspect-comp1-outro-source.jsx	38754	93	2792428493		2720921447
+B	inspect-comp1-pixel-border-partial.jsx	38848	16	505021280		2354032037
+B	inspect-comp1-prearrival-partial-remap.jsx	38865	35	2289305448		3964254409
+B	inspect-comp1-smoothzoom-partial.jsx	38901	35	2290091884		2730277857
+B	inspect-comp1-white-glyph-extract.jsx	38937	75	1671172084		1238891529
+B	inspect-composer-template-controls-safe.jsx	39013	132	1603869752		835532100
+B	inspect-composer-template-controls.jsx	39146	16	509739888		4277440503
+B	inspect-cta-typography.jsx	39163	54	1077742453		300484740
+B	inspect-current-card3-border.jsx	39218	17	573375385		1977849641
+B	inspect-current-compression-keys.jsx	39236	16	513082226		1575849633
+B	inspect-current-epic-perfect-rtfx.jsx	39253	94	3141538806		1691968801
+B	inspect-current-level-complete.jsx	39348	36	2420311972		2065560720
+B	inspect-current-player-hand-retime.jsx	39385	36	2403272609		2001812629
+B	inspect-current-pro-frames.jsx	39422	166	2213094206	capture-inspection-frame.jsx	1063572708
+B	inspect-current-red-overlay.jsx	39589	54	1074137978		1060966983
+B	inspect-current-win-stars-sweep.jsx	39644	57	1651051533		1460767478
+B	inspect-dash-black-flashes.jsx	39702	95	3390706707		4208584774
+B	inspect-dash-combo-voices.jsx	39798	114	2231834715		2029707982
+B	inspect-dash-duplicate-short-targets.jsx	39913	97	4149154958		951185697
+B	inspect-dash-wide-background-camera.jsx	40011	92	2552959909		1278459614
+B	inspect-dash-wide-critical-layout.jsx	40104	76	1864699915		2975671518
+B	inspect-dash-wide-order-and-source.jsx	40181	93	2883392475		2752832470
+B	inspect-dash-wide-shape-and-expressions.jsx	40275	17	568132500		742704519
+B	inspect-direction-square-transforms.jsx	40293	92	2596606891		1478273183
+B	inspect-dodge-sound-options.jsx	40386	94	3143701488		4229963889
+B	inspect-easy-15s-continuity.jsx	40481	16	513344368		153883035
+B	inspect-easy-normal-audio-sources.jsx	40498	16	513999730		3392752969
+B	inspect-element-overlay-dependencies.jsx	40515	55	1292372922		1451179806
+B	inspect-first45-rebuild-partial.jsx	40571	56	1475873772		8381781
+B	inspect-flash-source-mapping.jsx	40628	54	1105267589		2096418627
+B	inspect-frozen-arrow.jsx	40683	55	1267862441		2285827313
+B	inspect-game-grass-colors.jsx	40739	54	1122306966		3573153348
+B	inspect-game-selector.jsx	40794	16	511247213		2052472148
+B	inspect-gameplay-error-signals.jsx	40811	53	880282442		2845230546
+B	inspect-gameplay-hand-plan.jsx	40865	17	573703067		3785968595
+B	inspect-gameplay-match-dash2.jsx	40883	17	574620581		2506523116
+B	inspect-gate-cut-and-masks.jsx	40901	157	1146954026	capture-inspection-frame.jsx	1106377592
+B	inspect-gate-train-entry.jsx	41059	192	1291593852	capture-inspection-frame.jsx	2274433908
+B	inspect-hand-original-boundaries.jsx	41252	55	1305480138		2789202591
+B	inspect-hand-press-animation.jsx	41308	56	1499073523		845472564
+B	inspect-hard-danger-layers.jsx	41365	94	3149927405		4063801351
+B	inspect-hard-danger-layout.jsx	41460	96	3923514486		962011001
+B	inspect-hard-danger-targets.jsx	41557	16	518259580		2972051398
+B	inspect-hard-title-position.jsx	41574	56	1442581464		1698775733
+B	inspect-head-caption-contrast.jsx	41631	94	3178238973	capture-inspection-frame.jsx	681865096
+B	inspect-headline-layer-styles.jsx	41726	55	1249053609		135640448
+B	inspect-imported-rtfx-energy.jsx	41782	134	2268798054		435686215
+B	inspect-inner-zoom-light.jsx	41917	16	513409904		627399880
+B	inspect-knife-wall-expressions.jsx	41934	53	857606978		2803476441
+B	inspect-landscape-continuation.jsx	41988	55	1275923387		1930500314
+B	inspect-landscape-jump-keys.jsx	42044	74	1345654701		987930300
+B	inspect-landscape-knife-wall-keys.jsx	42119	54	1057164156		3220331549
+B	inspect-landscape-original-reset.jsx	42174	16	520356727		3656109664
+B	inspect-landscape-resize-state.jsx	42191	55	1298336710		439665573
+B	inspect-level-complete-outro-current-targets.jsx	42247	56	1416694744		450589924
+B	inspect-level-edit-isolation.jsx	42304	16	515769202		772156822
+B	inspect-level-zoom-wide.jsx	42321	16	510657391		962990038
+B	inspect-library-launch.jsx	42338	16	518783858		2214974816
+B	inspect-miss-cue-timing.jsx	42355	57	1689455661	capture-inspection-frame.jsx	964983251
+B	inspect-miss-drip-audio.jsx	42413	16	520815487		4100809116
+B	inspect-miss-swoosh.jsx	42430	17	571933599		1054924498
+B	inspect-miss-vfx-effects.jsx	42448	16	507642723		3064504717
+B	inspect-movie-002-animation-reference.jsx	42465	16	514327405		3501784296
+B	inspect-movie-003.jsx	42482	17	565773205		3751972738
+B	inspect-new-combo-audio.jsx	42500	54	1122175890		2541169756
+B	inspect-opening-master.jsx	42555	55	1265175466		3139809074
+B	inspect-opening-sfx.jsx	42611	54	1054935931		156342670
+B	inspect-other-layouts.jsx	42666	35	2283865967		557417458
+B	inspect-outro-animation.jsx	42702	94	3254326302		16178488
+B	inspect-outro-brand-assets.jsx	42797	55	1290210239		1055154359
+B	inspect-outro-hand-sway.jsx	42853	112	1244141529		1353017111
+B	inspect-outro-layouts.jsx	42966	56	1471482863		4083516766
+B	inspect-outro-remap-partial.jsx	43023	73	1251610540		490663734
+B	inspect-outro-text-style.jsx	43097	55	1303448512		1846509431
+B	inspect-partial-cartoon-art.jsx	43153	54	1077087100		3460386487
+B	inspect-partial-rtfx-combo-state.jsx	43208	55	1232800670		838620762
+B	inspect-partial-wind-state.jsx	43264	96	3850507354		3835528923
+B	inspect-pickle-eye-parts.jsx	43361	17	572654489		1266129351
+B	inspect-pickle-rig-capabilities.jsx	43379	16	508035949		695362639
+B	inspect-pickle-variant-preflight.jsx	43396	16	517997430		4212143661
+B	inspect-player-gameplay-sources.jsx	43413	56	1473186799		2410231262
+B	inspect-portrait-expressions.jsx	43470	55	1190661009		2220798936
+B	inspect-portrait-outro-footage.jsx	43526	16	502989670		4091463924
+B	inspect-praise-audio-preflight.jsx	43543	114	1910183974		658753818
+B	inspect-praise-word-frames.jsx	43658	36	2405107611	capture-inspection-frame.jsx	2745817457
+B	inspect-pro-mask-modes.jsx	43695	55	1283853248		2737799115
+B	inspect-pro-masks.jsx	43751	36	2400257938		463856587
+B	inspect-pro-source-clipping.jsx	43788	74	1342443441		3245747459
+B	inspect-reference-dash2-cues.jsx	43863	55	1291258817		3366178669
+B	inspect-refined-hand-state.jsx	43919	53	864095042		2790420704
+B	inspect-render-options.jsx	43973	35	2292385644		3904736566
+B	inspect-retime-33s.jsx	44009	56	1537674242		3124047680
+B	inspect-retime-content-end.jsx	44066	53	896207702		380422066
+B	inspect-rtfx-selected-assets.jsx	44120	157	1202397480		3339451865
+B	inspect-rwd007-element-cue-times.jsx	44278	157	1142300964		775433512
+B	inspect-rwd007-epic-perfect-text-effects.jsx	44436	153	3195150412		3384191489
+B	inspect-rwd007-final-train-route.jsx	44590	117	3003848857		1069617588
+B	inspect-rwd007-hand-audio-live.jsx	44708	75	1573720022		713618329
+B	inspect-rwd007-hand-element-mix.jsx	44784	136	3036290227		3130019826
+B	inspect-rwd007-hand-praise-title-current.jsx	44921	97	3934327896	capture-inspection-frame.jsx	2309160194
+B	inspect-rwd007-outro-audio.jsx	45019	55	1313672134		839168530
+B	inspect-rwd007-outro-overlap.jsx	45075	76	1888882716		1082873823
+B	inspect-rwd007-route-color-and-sources.jsx	45152	95	3427013664		462694379
+B	inspect-rwd007-source009-mechanic.jsx	45248	39	2837841997	capture-inspection-frame.jsx	4235077638
+B	inspect-rwd007-win-dark-corners.jsx	45288	75	1552945101		3792628314
+B	inspect-rwd007-win-endings.jsx	45364	156	590553337		2862407958
+B	inspect-rwd007-win-hold-layers.jsx	45521	74	1419710397		1775050892
+B	inspect-rwd007-win-style-and-camera.jsx	45596	193	2375559413		3965243982
+B	inspect-rwd008-stage-timing.jsx	45790	57	1673137175		1084530925
+B	inspect-rwd008-voice-mix.jsx	45848	56	1450642409		3988016846
+B	inspect-selected-layer.jsx	45905	96	3852538977		772246703
+B	inspect-selector-layout.jsx	46002	16	508035942		341489659
+B	inspect-selector-now.jsx	46019	16	513213299		941437710
+B	inspect-short-crossing-visibility-opacity.jsx	46036	129	18684787		3798697089
+B	inspect-short-crossing-visibility.jsx	46166	73	1133055884		1058452307
+B	inspect-short-version-comps.jsx	46240	93	2802979775		4172809846
+B	inspect-square-layout.jsx	46334	17	572851112		1747658561
+B	inspect-tap-precomp-readiness.jsx	46352	93	2770342855		595818418
+B	inspect-taunt-caption-partial.jsx	46446	16	519832441		2716652317
+B	inspect-taunt-text-details.jsx	46463	95	3522368566	capture-inspection-frame.jsx	3617824966
+B	inspect-taunt-text-reference.jsx	46559	95	3570340927	capture-inspection-frame.jsx	781739669
+B	inspect-text-fonts-and-layout.jsx	46655	57	1687424035	capture-inspection-frame.jsx	2302145090
+B	inspect-top-wall-clearance.jsx	46713	53	913509218		4097772216
+B	inspect-train-head-sources.jsx	46767	16	518325107		3087655384
+B	inspect-transfer30to58-detail.jsx	46784	96	3767735373		405839388
+B	inspect-transfer30to58.jsx	46881	17	566231959		2806695390
+B	inspect-updated-comp1-and-portrait-sfx.jsx	46899	17	570885014		1781392087
+B	inspect-user-33s-comps.jsx	46917	53	948243310		4166742888
+B	inspect-user-dash-layout-comps.jsx	46971	57	1622936580		461754402
+B	inspect-user-wall-alignment.jsx	47029	54	1121258386		615507467
+B	inspect-variant-face-stack.jsx	47084	56	1482492902		1483545507
+B	inspect-vd007-background-camera.jsx	47141	17	571933593		191275381
+B	inspect-vd007-wide-background.jsx	47159	17	572195743		3889508244
+B	inspect-vd057-background-color.jsx	47177	116	2667387004	capture-inspection-frame.jsx	1609249570
+B	inspect-vd057-destination-tail.jsx	47294	16	519439226		3511871220
+B	inspect-vd057-ending-and-reference.jsx	47311	94	3084194779		3090643083
+B	inspect-vd057-ending-audio-levels.jsx	47406	35	2278557542		1969482646
+B	inspect-vd057-ending-preflight-refresh.jsx	47442	16	512230252		1629155555
+B	inspect-vd057-ending-source-properties.jsx	47459	56	1442122715		7894415
+B	inspect-vd057-full-tray-cues.jsx	47516	275	2990488224	capture-inspection-frame.jsx	103897736
+B	inspect-vd057-landscape-assets.jsx	47792	17	570688415		3454008696
+B	inspect-vd057-landscape-resize.jsx	47810	17	575275939		1074884456
+B	inspect-vd057-live-gameplay-map.jsx	47828	74	1393823680		4046893001
+B	inspect-vd057-portal-sfx.jsx	47903	277	4203035345	capture-inspection-frame.jsx	1082542992
+B	inspect-vd057-praise-partial.jsx	48181	94	3101823984		933137971
+B	inspect-vd057-resize-expressions.jsx	48276	17	571343771		1033154791
+B	inspect-vd057-source-mapping.jsx	48294	95	3486520346		1947650337
+B	inspect-vd057-timing-frames.jsx	48390	92	2486899606		1729336641
+B	inspect-vd057-transfer-applied.jsx	48483	16	519504755		3280870708
+B	inspect-vd057-wide-combo-text.jsx	48500	75	1640632286		2566066560
+B	inspect-vd057-wide-live-check.jsx	48576	17	571474844		2258156434
+B	inspect-vd057-win-live.jsx	48594	35	2311194485		641416492
+B	inspect-wall-sampling-fixed.jsx	48630	54	1115360148		3276689292
+B	inspect-wall-sampling.jsx	48685	54	1085803396		1189092794
+B	inspect-wide-background-alpha.jsx	48740	55	1252133800		272059546
+B	inspect-wide-background-mismatch.jsx	48796	94	3158447109		925548938
+B	inspect-wide-before-first45.jsx	48891	35	2277771122		3363716519
+B	inspect-wide-framing-first45.jsx	48927	16	511378280		1290486318
+B	inspect-wide-hand-render-offset.jsx	48944	56	1482558440		2657329733
+B	inspect-wide-hand-source-chain.jsx	49001	54	1041632111		1668199743
+B	inspect-wide-outro-source.jsx	49056	93	2905215949		3646151716
+B	inspect-wide-resize.jsx	49150	93	2926121948		2894651528
+B	inspect-wind-placement-and-upper-gate.jsx	49244	156	743448823	capture-inspection-frame.jsx	372220320
+B	inspect-wind-separation.jsx	49401	17	568787863		985233275
+B	inspect-wrong-audio.jsx	49419	16	513868656		2224947694
+B	isolate-comp1-arrow-glyph-flash-matte.jsx	49436	56	1505168390		670073397
+B	isolate-level-content-from-zoom-keys.jsx	49493	17	573440928		863780561
+B	keep-player-hand-visible-and-select-direction.jsx	49511	281	3828431784		2272173094
+B	keep-rwd007-hand-visible-through-gameplay.jsx	49793	276	2754427491		4033498876
+B	knife-frame-layout-final.jsx	50070	57	1624968195		260134138
+B	knife-identical-ends-manual-keys.jsx	50128	136	3108510898		357672540
+B	limit-dash-combos-to-filled-tiles-cleanup.jsx	50265	55	1220742050		2756352035
+B	list-bones-effects.jsx	50321	16	511574890		833182815
+B	list-current-element-comps.jsx	50338	16	511771502		1504280428
+B	list-element-plugin-effects.jsx	50355	16	508167012		2714060602
+B	make-wind-suction-and-place-lower-gate.jsx	50372	181	2728863288		3252566364
+B	match-dash2-gameplay-camera-45s.jsx	50554	59	2056260727		3194472355
+B	match-perimeter-grass-to-gameplay.jsx	50614	17	563807131		3021869084
+B	match-pickle-reference-eyes.jsx	50632	99	451941598		2816120465
+B	match-reference-taunt-and-pucker.jsx	50732	339	2260485986		584280899
+B	match-square-versus.jsx	51072	36	2403075987		3333714524
+B	match-vd057-background-to-grass.jsx	51109	156	514400473	capture-inspection-frame.jsx	1132376479
+B	move-dash-outro-to-42s.jsx	51266	482	3276367468		1370411147
+B	mute-vd057-cool-sfx.jsx	51749	114	2098075717		3073851226
+B	open-pickle-eyes-straight-brows.jsx	51864	158	1581719878		3217881216
+B	optimize-wide-level-wall-preview.jsx	52023	16	513868659		299316528
+B	organize-ad45-audio.jsx	52040	55	1279921078		1381176264
+B	orient-wide-hand-at-bottom.jsx	52096	55	1232931740		3481340877
+B	outro-arrow-tap-blue.jsx	52152	74	1366626224		4143767312
+B	outro-white-text-only.jsx	52227	36	2401634204		4042579052
+B	pickle-articulated-ankle-foot-roll.jsx	52264	94	3068007394		4264802759
+B	pickle-attached-leu-leu-tongue.jsx	52359	173	1960322189		114787953
+B	pickle-back-of-hand-view.jsx	52533	171	990585918		151756640
+B	pickle-continuous-leg-foot-bones.jsx	52705	94	3071480809		779135345
+B	pickle-eyes-look-left-right.jsx	52800	93	2847413201		2084532049
+B	pickle-four-finger-hands.jsx	52894	276	2866887232		3035611728
+B	pickle-goofy-teasing-expression.jsx	53171	140	543497535		2885407353
+B	pickle-hide-extra-fingers-planted-bounce.jsx	53312	95	3383301125		3903042721
+B	pickle-independent-eye-glances.jsx	53408	94	3098350575		2773633380
+B	pickle-left-arm-in-front.jsx	53503	94	3128038396		1209756726
+B	pickle-manic-taunt-flexible-tongue.jsx	53598	98	119674012		899836699
+B	pickle-raised-middle-finger.jsx	53697	273	4100209070		1080961082
+B	pickle-rounded-mouth-pretty-short-tongue.jsx	53971	176	3672122645		2647516557
+B	pickle-seamless-ankle-shafts.jsx	54148	96	3676836914		1206286303
+B	pickle-short-tongue-sway-arms.jsx	54245	135	2731941026		3449682978
+B	pickle-soft-cartoon-lip-motion.jsx	54381	239	2713596503		220521305
+B	pickle-soft-rounded-tongue.jsx	54621	255	4205786584		3856561626
+B	pickle-stable-rounded-lips.jsx	54877	255	3694933388		3168790237
+B	place-arrowout-outros.jsx	55133	36	2406942625		1313863611
+B	polish-ad45-timings.jsx	55170	57	1660685331		3128236106
+B	polish-outro-type-spacing.jsx	55228	73	1088622467		3278960827
+B	precompose-tap-cta-zoom.jsx	55302	36	2406352799		4225410595
+B	prepare-active-background-soften.jsx	55339	130	444668846		588178944
+B	prepare-bones-body-rig.jsx	55470	16	512689012		3299687496
+B	prepare-cartoon-transform-effect.jsx	55487	95	3383694359		1262353986
+B	prepare-comp1-arrow-glyph-key.jsx	55583	35	2307458945		2721257403
+B	prepare-comp1-focus-plugin-properties.jsx	55619	36	2426603437		833644668
+B	prepare-comp1-native-element-fx.jsx	55656	17	572064673		1929876625
+B	prepare-comp1-real-edge-matte.jsx	55674	75	1647316967		1365062077
+B	prepare-comp1-requested-plugins.jsx	55750	54	1116670872		817524383
+B	prepare-pickle-motion-reference.jsx	55805	17	568263581		1609644712
+B	prepare-rwd007-win-gameplay-blur.jsx	55823	140	653860211		1775229726
+B	prepare-rwd007-win-native-effects.jsx	55964	116	2742950031		22381686
+B	prepare-selector-reference.jsx	56081	16	502465377		1911009025
+B	prepare-vd057-background-color-match.jsx	56098	75	1644957665		3828337272
+B	prepare-wall-tiling.jsx	56174	55	1251806116		2600207728
+B	preserve-old-selector-layout.jsx	56230	53	898173784		4129737477
+B	preview-blue-arrow-tap.jsx	56284	53	849808171		3267469372
+B	preview-comp1-compact-gate.jsx	56338	34	2161051448		1249856843
+B	preview-grass-easy-color.jsx	56373	54	1083444081		1161852354
+B	preview-grass-hard-color.jsx	56428	54	1082985332		4087183170
+B	preview-portrait-outro.jsx	56483	53	854723377		2262341524
+B	preview-square-outro.jsx	56537	53	852101939		3392377786
+B	preview-synced-wall07.jsx	56591	54	1052642156		944399699
+B	preview-wide-15s-outro.jsx	56646	54	1082395507		1654422865
+B	preview-wide-gameplay.jsx	56701	34	2177894218		2972276330
+B	preview-wide-outro.jsx	56736	53	852822836		2369885006
+B	raise-hard-title.jsx	56790	56	1450314728		1450889855
+B	read-active-background-soften-schema.jsx	56847	95	3425506337		1429469504
+B	read-arrow-key-effect-names.jsx	56943	16	507183977		900305883
+B	read-comp1-arrow-key-properties.jsx	56960	56	1454967775		440077162
+B	read-comp1-focus-plugin-properties.jsx	57017	152	2908168259		3504582070
+B	read-gameplay-background-fill-base.jsx	57170	16	514851705		2756113715
+B	read-gameplay-background-fill.jsx	57187	74	1479872465		2978801918
+B	read-library-connection-check.jsx	57262	16	511509352		1221223564
+B	read-rwd007-fast-title-partial.jsx	57279	57	1680804892		381775756
+B	read-rwd007-hand-mapping.jsx	57337	17	573506461		1016016325
+B	read-rwd007-source-mapping.jsx	57355	16	507052900		899194621
+B	rebalance-square-layout.jsx	57372	98	153162933		2170071951
+B	rebuild-dash-original-first45-both.jsx	57471	498	2916313393		2234493134
+B	recheck-current-pro-errors.jsx	57970	74	1385435068		1276560071
+B	recover-separate-gate-wind-precomps.jsx	58045	18	629605312	capture-inspection-frame.jsx	1557343943
+B	recut-ad45-to-axel-beats.jsx	58064	138	4049607997		692551818
+B	recut-dash-duplicate-two-formats-to-15s.jsx	58203	18	626918341		1040700733
+B	recut-updated-comp1-pixel-borders-natural-sfx.jsx	58222	461	2758303992		798279858
+B	recut-user-9x17-16x10-to-15s.jsx	58684	244	3340579781		2265793361
+B	reference-style-outros.jsx	58929	17	568001439		3754877977
+B	refine-bones-raised-arm-rest.jsx	58947	97	4033221728		3393114435
+B	refine-click-before-measured-coil.jsx	59045	94	3140686847		820496717
+B	refine-comp1-white-only-arrow-glyph.jsx	59140	16	510722934		1294040852
+B	refine-current-praise-errors.jsx	59157	113	1524504552	capture-inspection-frame.jsx	3245454027
+B	refine-current-remaining.jsx	59271	35	2285504375	capture-inspection-frame.jsx	2092745609
+B	refine-direction-square-press-timing.jsx	59307	153	3509526666		455769964
+B	refine-first45-prearrival-hand.jsx	59461	218	2879270379		897371995
+B	refine-landscape-miss-anchors.jsx	59680	74	1371672503		2403078765
+B	refine-portrait-labels.jsx	59755	76	1953501227		864356093
+B	refine-praise-onsets.jsx	59832	153	3536855174	capture-inspection-frame.jsx	147956678
+B	refine-reference-knee-bends.jsx	59986	172	1671439491		633853670
+B	refine-reference-plump-soft-tongue.jsx	60159	218	2518035881		2387612713
+B	refine-rtfx-epic-impact.jsx	60378	58	1818692653		3777038017
+B	refine-rwd007-cartoon-title-stars-shared-sweep.jsx	60437	37	2539718602		3950304910
+B	refine-rwd007-choice-lead.jsx	60475	154	3709018234		736692147
+B	refine-rwd007-clean-route-seams.jsx	60630	59	2023558253		940090872
+B	refine-rwd007-fast-title-transition.jsx	60690	214	296758589	capture-inspection-frame.jsx	3850305649
+B	refine-rwd007-sequential-retained-words.jsx	60905	296	2278178533		3333997312
+B	refine-rwd007-single-word-popups.jsx	61202	256	1004680746		710316153
+B	refine-rwd007-win-to-game-popup.jsx	61459	179	1350444481		578793925
+B	refine-rwd007-word-by-word-win.jsx	61639	287	521092225		3971681167
+B	refine-square-hand-wait.jsx	61927	56	1482820593		1228381508
+B	refine-vd057-wide-background.jsx	61984	54	1104350096		1948759870
+B	refine-wall-flash-sampling.jsx	62039	17	571933593		3089209630
+B	rekey-current-player-hand-to-real-squares.jsx	62057	1151	3603297047		3845948034
+B	rekey-rigid-landscape-wall-contacts.jsx	63209	56	1449266144		3862315751
+B	rekey-wide-player-hand-to-real-squares.jsx	63266	17	564462483		3442149188
+B	remove-arrowout-entrance.jsx	63284	36	2410153893		280966530
+B	remove-dash-win-card.jsx	63321	97	4094497932		3778633581
+B	remove-gameplay-top-level-labels.jsx	63419	16	516293491		4251482791
+B	remove-rwd007-selection-sfx.jsx	63436	77	2178289744		1241674213
+B	render-ad45-audio.jsx	63514	171	875701306		1517099558
+B	render-ad45-review.jsx	63686	57	1629621257		4000064026
+B	repair-bones-source-canvas.jsx	63744	217	2954243589		4051891638
+B	replace-comp1-drawn-strokes-with-pixel-borders.jsx	63962	297	2289843881		292633209
+B	replace-landscape-outro-fixed.jsx	64260	55	1277954990		3031903002
+B	replace-level-walls-with-user-images.jsx	64316	97	4155905177		1532876338
+B	replace-pickle-blink-with-lids.jsx	64414	190	658581644		3620854423
+B	resize-9x17-to-16x9.jsx	64605	97	4208465032		2325414678
+B	resize-current-portrait-to-wide-size.jsx	64703	56	1392774087		204816557
+B	resize-user-dash-16x9-from-portrait.jsx	64760	18	629670857		4000519259
+B	resize-vd057-portrait-into-landscape.jsx	64779	18	632619992		2052108963
+B	restore-9x16-portrait-dimensions.jsx	64798	17	567739289		3217604326
+B	restore-classic-element-overlays45.jsx	64816	115	2173704255		1507382746
+B	restore-crazyfrog-music-mix.jsx	64932	57	1653935121		2012807823
+B	restore-cropped-card-anchors.jsx	64990	56	1488260082		2557739726
+B	restore-miss-caption-style.jsx	65047	133	1708858397		3376599925
+B	restore-natural-easy-normal-sfx-15s.jsx	65181	17	567477139		4075297396
+B	restore-pro-panel-alignment.jsx	65199	76	1873285124		1587902612
+B	restore-vd057-cool-sfx.jsx	65276	317	4223288168		1328273605
+B	retime-dash-to-45s.jsx	65594	96	3700823111		4221004172
+B	retime-rwd007-to30s.jsx	65691	36	2401240988		746679855
+B	reverse-selector-right-to-left.jsx	65728	35	2302084987		1681817286
+B	rig-pickle-bones-smooth-cartoon.jsx	65764	221	992423551		1915657787
+B	rig-two-pickle-variants-with-bones.jsx	65986	199	1802840556		511964910
+B	round-pickle-taunt-hands.jsx	66186	393	15749888		2797107562
+B	sample-all-choice-squares.jsx	66580	96	3793687646		614747699
+B	sample-direction-square-arrival-targets.jsx	66677	212	3174968543		1388621014
+B	sample-outline-square-projection.jsx	66890	193	2369923309		2072380821
+B	selector-front-before-spin.jsx	67084	97	4046066809		901065227
+B	separate-cartoon-eye-lids.jsx	67182	77	2191069263		3483671319
+B	separate-gate-wind-precomps.jsx	67260	503	214461055	capture-inspection-frame.jsx	543710044
+B	separate-pickle-eye-rig.jsx	67764	17	573178786		2328838859
+B	separate-reference-leg-positions.jsx	67782	159	2312839558		2866959441
+B	set-ad45-master-audio-gain.jsx	67942	53	897190731		337513294
+B	set-rwd007-music-minus10.jsx	67996	78	2448822398		2199884485
+B	shorten-hard-flash-add-danger-sfx.jsx	68075	96	3845919851		1092230430
+B	show-bridge-connection-status.jsx	68172	16	509739880	Codex Bridge.jsx	2653659132
+B	show-click-before-knife-compress.jsx	68189	253	3281925572		3820810485
+B	show-current-player-hand-click-proof.jsx	68443	16	507904877		2270543506
+B	show-front-card3.jsx	68460	16	503710567		405586661
+B	show-rwd007-fixed-choice.jsx	68477	153	3593609351		3658334452
+B	show-wide-player-hand-click-proof.jsx	68631	90	1743459081		1056030455
+B	single-red-error-cues.jsx	68722	112	1249515480		2354826801
+B	smaller-portrait-labels.jsx	68835	55	1203047310		676138842
+B	soft-red-gameplay-flashes.jsx	68891	230	386412739		3295061589
+B	split-portal-wind-two-gate-comps.jsx	69122	436	4232404046		1635102020
+B	square-game-safe-margin.jsx	69559	58	1829506110		727283613
+B	stabilize-pickle-bones-shapes.jsx	69618	144	2527338015		2608499922
+B	start-carousel-on-screen1.jsx	69763	155	361767159		4088153060
+B	style-other-comparisons.jsx	69919	100	833492263		4028313385
+B	style-square-comparison.jsx	70020	17	564921236		4098735472
+B	sync-all-hand-knife-clicks.jsx	70038	99	549590274		3944159041
+B	sync-dash-wide-background-to-gameplay-camera.jsx	70138	100	825103642		3710758215
+B	sync-level-wall-zoom-and-video-light.jsx	70239	57	1602358261		4219146807
+B	sync-new-pro-combo-sfx.jsx	70297	75	1588465613		3763423566
+B	thicken-iq-caption-strokes.jsx	70373	55	1274284972		3041915316
+B	thicken-you-cant-hit-me-strokes.jsx	70429	132	1610488890		3759794954
+B	tone-match-generated-walls.jsx	70562	55	1229851549		2284620053
+B	update-background-lavender.jsx	70618	95	3502314541		1114875510
+B	update-background-warm-beige.jsx	70714	191	986196087		3893269987
+B	update-codex-bridge-panel.jsx	70906	17	566690714	Codex Bridge.jsx	2245940101
+B	update-current-gameplay-cues.jsx	70924	76	1890652184		4281427208
+B	use-requested-gameplay-hand-image.jsx	71001	97	4175697054		2852182838
+B	validate-final-pickle-bones-lids.jsx	71099	57	1633946635		2818444961
+B	verify-all-eight-gameplay-hands.jsx	71157	115	2456361078		1072328458
+B	verify-all-hand-knife-clicks.jsx	71273	16	510264174		3113259331
+B	verify-and-capture-iw-difficulty-text.jsx	71290	17	572851106		922369709
+B	verify-and-capture-train-head-clicks.jsx	71308	216	2171612644		385010992
+B	verify-capture-ad45.jsx	71525	94	3113358323	capture-inspection-frame.jsx	1427945179
+B	verify-capture-cartoon-2d-vortex.jsx	71620	76	1860636681	capture-inspection-frame.jsx	3841434641
+B	verify-capture-rwd007-3d-win.jsx	71697	157	1203577143		3933455919
+B	verify-capture-rwd007-cartoon-title-stars.jsx	71855	223	2966105885	capture-inspection-frame.jsx	1168804548
+B	verify-capture-rwd007-clean-final-route.jsx	72079	77	2167672901	capture-inspection-frame.jsx	56872972
+B	verify-capture-rwd007-early-hand-asmr.jsx	72157	97	4068414579	capture-inspection-frame.jsx	2829325238
+B	verify-capture-rwd007-full-frame-dim.jsx	72255	229	3423219813	capture-inspection-frame.jsx	1343162943
+B	verify-capture-rwd007-hand-clarity.jsx	72485	195	3815123295		3682907432
+B	verify-capture-rwd007-hand-color-fast-title.jsx	72681	190	33957904	capture-inspection-frame.jsx	4070214606
+B	verify-capture-rwd007-outro-overlap.jsx	72872	258	3873650422	capture-inspection-frame.jsx	893841218
+B	verify-capture-rwd007-perfect-cool.jsx	73131	58	1829178426	capture-inspection-frame.jsx	4278954780
+B	verify-capture-rwd007-win-popup.jsx	73190	294	3628875290		1754533038
+B	verify-capture-rwd008-mode-enhancement.jsx	73485	154	3767804045		3849383847
+B	verify-capture-toy-vortex-30s.jsx	73640	197	1007954395	capture-inspection-frame.jsx	970115802
+B	verify-capture-vd057-level-outro.jsx	73838	133	2078547031	capture-inspection-frame.jsx	3537654157
+B	verify-cartoon-combos-and-sfx.jsx	73972	115	2257066059		3369193963
+B	verify-classic-elements45.jsx	74088	116	2614564983		1309567018
+B	verify-cohesive-outros.jsx	74205	111	1037047756	capture-inspection-frame.jsx	1114084071
+B	verify-combo-x8-green.jsx	74317	156	753410311	capture-inspection-frame.jsx	659332619
+B	verify-complete-square-crossings.jsx	74474	308	2190557540		4291374167
+B	verify-crossing-offscreen-detail.jsx	74783	348	1712540124		3716240742
+B	verify-current-portrait-resized-wide.jsx	75132	17	567935895		1990871249
+B	verify-current-pro-cues.jsx	75150	118	3609991418	capture-inspection-frame.jsx	3296002962
+B	verify-dash-45s-filled-combos.jsx	75269	177	249308526		2271738830
+B	verify-dash-combo-win.jsx	75447	116	2769557655		2886815259
+B	verify-dash2-match45.jsx	75564	75	1596854242		972047655
+B	verify-deep-cartoon-suction.jsx	75640	178	981411252	capture-inspection-frame.jsx	3106729401
+B	verify-direction-square-hands.jsx	75819	114	2018121775		944157703
+B	verify-export-rwd007-audio-mix.jsx	75934	154	3756662912		826292295
+B	verify-final-train-head-taps.jsx	76089	135	2524978281		649457011
+B	verify-final-user-15s-edits.jsx	76225	17	563413898		2004425081
+B	verify-four-comps-33s.jsx	76243	36	2407335839		2520991672
+B	verify-game-selector-5s.jsx	76280	16	511247215		450250914
+B	verify-gameplay-hand-state.jsx	76297	36	2439317422		2440415423
+B	verify-head-caption-contrast.jsx	76334	16	513934188		2157473906
+B	verify-knife-compression-poses.jsx	76351	96	3762099267	capture-inspection-frame.jsx	1605593431
+B	verify-landscape-adaptation.jsx	76448	152	2864586803	capture-inspection-frame.jsx	3212766898
+B	verify-loading-bar.jsx	76601	60	2269645997		46977902
+B	verify-manic-pickle-cycle.jsx	76662	130	461839273	capture-inspection-frame.jsx	547310542
+B	verify-natural-15s-sfx.jsx	76793	16	516424559		2066415094
+B	verify-original-first45-both.jsx	76810	116	2657818744		1470615673
+B	verify-outlined-small-hands-technical.jsx	76927	289	3112189249		980364104
+B	verify-outlined-small-hands.jsx	77217	234	3364827537		3354674487
+B	verify-pickle-animation-10s.jsx	77452	113	1599674366	capture-inspection-frame.jsx	4004989726
+B	verify-pickle-bones-eyelids.jsx	77566	55	1276513212	capture-inspection-frame.jsx	4088878131
+B	verify-pickle-lids.jsx	77622	16	511968113		1021398189
+B	verify-player-hand-rekey-real-gameplay.jsx	77639	451	1986027386		3004612537
+B	verify-portal-closing-light.jsx	78091	58	1855720516	capture-inspection-frame.jsx	764821087
+B	verify-portal-wind-12s-readonly.jsx	78150	278	496122575	capture-inspection-frame.jsx	2993624362
+B	verify-prearrival-square-presses.jsx	78429	372	2309377737		2819210605
+B	verify-reference-outros.jsx	78802	95	3361936412		2174423256
+B	verify-reference-pickle-hip-overlap.jsx	78898	135	2722045072	capture-inspection-frame.jsx	3467745677
+B	verify-reference-tongue-detail.jsx	79034	55	1266158516	capture-inspection-frame.jsx	1382252672
+B	verify-requested-gameplay-hand-image.jsx	79090	211	2536910006		626016882
+B	verify-rigid-wall-blades.jsx	79302	75	1604915160	capture-inspection-frame.jsx	722918371
+B	verify-rwd007-30s.jsx	79378	74	1301745567		1818678454
+B	verify-rwd007-choice-clicks.jsx	79453	312	2324120098		2588517477
+B	verify-rwd007-continuous-hand.jsx	79766	157	1255743796	capture-inspection-frame.jsx	2770137766
+B	verify-rwd007-element-sfx-library.jsx	79924	194	3079678232		1212790496
+B	verify-rwd007-hand-wait-before-train.jsx	80119	276	3138927227	capture-inspection-frame.jsx	2763271221
+B	verify-rwd007-next-control-before-train.jsx	80396	531	874803356	capture-inspection-frame.jsx	2591877582
+B	verify-rwd007-tap-only-hand.jsx	80928	430	3593493280	capture-inspection-frame.jsx	781112506
+B	verify-rwd007-visible-physical-click.jsx	81359	36	2411792285	capture-inspection-frame.jsx	823103269
+B	verify-rwd008-difficulty-voices.jsx	81396	115	2275285069		3862543235
+B	verify-short-miss-edits.jsx	81512	35	2315061122	capture-inspection-frame.jsx	249482532
+B	verify-square-hand-technical.jsx	81548	57	1649871879		3049319267
+B	verify-square-layout.jsx	81606	55	1252527017		2690505847
+B	verify-taunt-caption-frames.jsx	81662	93	2849248208	capture-inspection-frame.jsx	520358264
+B	verify-two-pickle-taunt-variants.jsx	81756	116	2680559739	capture-inspection-frame.jsx	3630259769
+B	verify-two-portal-wind-comps.jsx	81873	78	2381451368	capture-inspection-frame.jsx	187576880
+B	verify-vd057-full-tray-praise.jsx	81952	55	1256197039	capture-inspection-frame.jsx	3911088983
+B	verify-vd057-landscape-resize.jsx	82008	136	3477937433	capture-inspection-frame.jsx	61856140
+B	verify-vd057-portal-sfx.jsx	82145	112	1244731346		2465603251
+B	verify-vd057-wide-hand-follow.jsx	82258	154	4200997050	capture-inspection-frame.jsx	4222361118
+B	verify-vd057-wide-hand-scale130.jsx	82413	53	909773647	capture-inspection-frame.jsx	2349291751
+B	verify-wall-and-trampoline-constraints.jsx	82467	56	1418791878		795072106
+B	verify-wall-light-sync.jsx	82524	56	1421347781		3421107343
+B	verify-wide-native-background-dash2.jsx	82581	17	574292898		2535084983
+B	verify-wide-player-hand-rekey.jsx	82599	57	1660226574		2260259220
+B	vertical-wide-versus-divider.jsx	82657	134	2070813742		2840552629
+B	view-comparison-16x9.jsx	82792	16	508101479		1182761432
+B	view-comparison-9x16.jsx	82809	92	2458981245		1193902552
+B	view-comparison-square.jsx	82902	92	2466386815		1326809436
+B	view-wrong-tap-example.jsx	82995	53	857869108		2848955765
+M	m00001	83049	45412	2021222141
+M	m00002	128462	27279	3826941258
+M	m00003	155742	16221	1187898478
+M	m00004	171964	575	3751786686
+M	m00005	172540	7	109379951
+M	m00006	172548	79	289282516
+M	m00007	172628	143	183642438
+M	m00008	172772	424	304645086
+M	m00009	173197	161	1278620547
+M	m00010	173359	15	410190598
+M	m00011	173375	8	135397775
+M	m00012	173384	46	1216351746
+M	m00013	173431	14	427361078
+M	m00014	173446	10	218628714
+M	m00015	173457	62	2782729310
+M	m00016	173520	14	359662308
+M	m00017	173535	206	2856731311
+M	m00018	173742	42	3988065045
+M	m00019	173785	9	163512751
+M	m00020	173795	297	1334532899
+M	m00021	174093	12	260440591
+M	m00022	174106	16	480576374
+M	m00023	174123	345	983262635
+M	m00024	174469	133	1912545230
+M	m00025	174603	15	376242799
+M	m00026	174619	23	884278358
+M	m00027	174643	93	3169524197
+M	m00028	174737	37	2643069158
+M	m00029	174775	192	1623471400
+M	m00030	174968	227	155403640
+M	m00031	175196	113	995565350
+M	m00032	175310	142	2165647218
+M	m00033	175453	41	3591244546
+M	m00034	175495	16	419037839
+M	m00035	175512	4	43909391
+M	m00036	175517	14	335544911
+M	m00037	175532	99	2667650388
+M	m00038	175632	187	1344811283
+M	m00039	175820	18	536281959
+M	m00040	175839	57	2905607801
+M	m00041	175897	106	4081720958
+M	m00042	176004	19	666960854
+M	m00043	176024	18	629671003
+M	m00044	176043	13	307823234
+M	m00045	176057	90	3076135115
+M	m00046	176148	10	193724879
+M	m00047	176159	105	1063854842
+M	m00048	176265	17	537002965
+M	m00049	176283	5	63635759
+M	m00050	176289	218	3461105831
+M	m00051	176508	46	1882394510
+M	m00052	176555	14512	1400770555
+M	m00053	191068	13608	1449110689
+M	m00054	204677	13312	3923836557
+M	m00055	217990	1897	626101770
+M	m00056	219888	11054	1878091662
+M	m00057	230943	13004	2566356593
+M	m00058	243948	12665	2366647447
+M	m00059	256614	1876	4034816787
+M	m00060	258491	10374	3729700803
+M	m00061	268866	54	3294630006
+M	m00062	268921	12577	2232780128
+M	m00063	281499	5960	1710356617
+M	m00064	287460	6136	3867422406
+M	m00065	293597	12253	2701745583
+M	m00066	305851	12035	595189563
+M	m00067	317887	86	302587438
+M	m00068	317974	3367	2836948441
+M	m00069	321342	8382	3791471865
+M	m00070	329725	2036	3906116163
+M	m00071	331762	3953	82445259
+M	m00072	335716	5025	2539950246
+M	m00073	340742	11191	986007333
+M	m00074	351934	319	3702746668
+M	m00075	352254	103	1569005846
+M	m00076	352358	571	2377164103
+M	m00077	352930	2574	92040222
+M	m00078	355505	29	2521500179
+M	m00079	355535	17	525075327
+M	m00080	355553	20	1232602849
+M	m00081	355574	1759	1543571766
+M	m00082	357334	65	3120108958
+M	m00083	357400	4168	2952167190
+M	m00084	361569	11226	2986402328
+M	m00085	372796	11101	2876808026
+M	m00086	383898	34	3510701047
+M	m00087	383933	121	3664849356
+M	m00088	384055	1118	259677917
+M	m00089	385174	70	3653965053
+M	m00090	385245	3701	3117348343
+M	m00091	388947	5325	3916079222
+M	m00092	394273	105	1184506296
+M	m00093	394379	100	2791644583
+M	m00094	394480	373	3748234139
+M	m00095	394854	116	2280270102
+M	m00096	394971	6	108528093
+M	m00097	394978	71	2101156086
+M	m00098	395050	975	930758301
+M	m00099	396026	227	696405704
+M	m00100	396254	174	2879274585
+M	m00101	396429	4271	457663125
+M	m00102	400701	1062	692281819
+M	m00103	401764	606	2367732468
+M	m00104	402371	1539	410848251
+M	m00105	403911	7	147980842
+M	m00106	403919	1321	2912997109
+M	m00107	405241	2267	2042627824
+M	m00108	407509	377	3384246694
+M	m00109	407887	20	1181288004
+M	m00110	407908	137	3476826416
+M	m00111	408046	1671	1181170853
+M	m00112	409718	3054	2904745647
+M	m00113	412773	108	1001596579
+M	m00114	412882	136	4269027582
+M	m00115	413019	1194	2911540362
+M	m00116	414214	172	125647683
+M	m00117	414387	22	1603078127
+M	m00118	414410	2437	4225317675
+M	m00119	416848	849	158733120
+M	m00120	417698	68	3961263532
+M	m00121	417767	12	248447557
+M	m00122	417780	1029	1530019
+M	m00123	418810	11	375849907
+M	m00124	418822	1895	4043723403
+M	m00125	420718	1748	3200862093
+M	m00126	422467	207	2910078066
+M	m00127	422675	410	440241534
+M	m00128	423086	2468	2097277043
+M	m00129	425555	1408	1543083404
+M	m00130	426964	141	4005242980
+M	m00131	427106	198	2800432886
+M	m00132	427305	146	1056188323
+M	m00133	427452	1938	2269996896
+M	m00134	429391	76	4147190635
+M	m00135	429468	1687	1947406758
+M	m00136	431156	268	3370997648
+M	m00137	431425	712	1535109330
+M	m00138	432138	6069	3769362390
+M	m00139	438208	76	676730586
+M	m00140	438285	634	1077140026
+M	m00141	438920	7633	916647627
+M	m00142	446554	31	3105688357
+M	m00143	446586	733	3026647643
+M	m00144	447320	1575	2063605616
+M	m00145	448896	545	1293657647
+M	m00146	449442	1761	495206863
+M	m00147	451204	981	3046713881
+M	m00148	452186	216	48645468
+M	m00149	452403	2076	2771625912
+M	m00150	454480	519	1433384162
+M	m00151	455000	202	1518618589
+M	m00152	455203	42	1346637706
+M	m00153	455246	6	109707743
+M	m00154	455253	1916	2720439758
+M	m00155	457170	41	902434384
+M	m00156	457212	445	3872170665
+M	m00157	457658	101	3040813279
+M	m00158	457760	1117	1687130352
+M	m00159	458878	232	324752476
+M	m00160	459111	4	45678869
+M	m00161	459116	646	3784427791
+M	m00162	459763	553	4149785751
+M	m00163	460317	681	3063150712
+M	m00164	460999	1379	270851883
+M	m00165	462379	38	83299730
+M	m00166	462418	2668	4136266144
+M	m00167	465087	3999	3915537690
+M	m00168	469087	170	497237843
+M	m00169	469258	8708	1224358219
+M	m00170	477967	589	1079496866
+M	m00171	478557	5	68616546
+M	m00172	478563	131	494874310
+M	m00173	478695	63	2771326379
+M	m00174	478759	1662	1713450588
+M	m00175	480422	398	3390670281
+M	m00176	480821	165	2215327473
+M	m00177	480987	147	1303784594
+M	m00178	481135	1037	1922062334
+M	m00179	482173	597	1635631853
+M	m00180	482771	1381	1220658556
+M	m00181	484153	303	935618298
+M	m00182	484457	1509	2908946327
+M	m00183	485967	6672	1939546970
+M	m00184	492640	862	3653574692
+M	m00185	493503	187	2563852183
+M	m00186	493691	70	2261784908
+M	m00187	493762	106	2862097628
+M	m00188	493869	12	422839305
+M	m00189	493882	6	105972143
+M	m00190	493889	889	1510753021
+M	m00191	494779	734	1754526856
+M	m00192	495514	495	577218340
+M	m00193	496010	206	6570320
+M	m00194	496217	2955	1973301045
+M	m00195	499173	102	2218336638
+M	m00196	499276	257	3647295793
+M	m00197	499534	31	3171814383
+M	m00198	499566	84	2134186607
+M	m00199	499651	97	2616400945
+M	m00200	499749	1987	3298927945
+M	m00201	501737	90	2246123192
+M	m00202	501828	201	2408531697
+M	m00203	502030	13	432735211
+M	m00204	502044	25	1943210239
+M	m00205	502070	287	1684825506
+M	m00206	502358	7	120062435
+M	m00207	502366	3	23789749
+M	m00208	502370	288	3986385111
+M	m00209	502659	674	4238403121
+M	m00210	503334	1105	2183487861
+M	m00211	504440	7	132252131
+M	m00212	504448	11	393610184
+M	m00213	504460	1530	2427381551
+M	m00214	505991	8270	1875413822
+M	m00215	514262	8246	573097713
+M	m00216	522509	1339	639946981
+M	m00217	523849	3893	3507482892
+M	m00218	527743	1429	4287814844
+M	m00219	529173	1152	3105982856
+M	m00220	530326	666	1712383978
+M	m00221	530993	10	308872024
+M	m00222	531004	409	1355710524
+M	m00223	531414	540	1380820183
+M	m00224	531955	960	657861280
+M	m00225	532916	9	226362047
+M	m00226	532926	247	2841596877
+M	m00227	533174	610	822723409
+M	m00228	533785	3376	3450232125
+M	m00229	537162	4907	55081658
+M	m00230	542070	3548	125926545
+M	m00231	545619	1655	2743487515
+M	m00232	547275	4	48169254
+M	m00233	547280	2350	1739199479
+M	m00234	549631	631	1946404766
+M	m00235	550263	2715	319304044
+M	m00236	552979	318	1002661653
+M	m00237	553298	3308	3348066527
+M	m00238	556607	3817	1131814568
+M	m00239	560425	2523	3913557929
+M	m00240	562949	5312	347576146
+M	m00241	568262	227	3224848513
+M	m00242	568490	7252	5818865
+M	m00243	575743	146	2471572346
+M	m00244	575890	12	480838773
+M	m00245	575903	118	3724749176
+M	m00246	576022	13	521864272
+M	m00247	576036	6	108986846
+M	m00248	576043	51	3277590923
+M	m00249	576095	18	966526491
+M	m00250	576114	100	994583678
+M	m00251	576215	128	2968661458
+M	m00252	576344	269	1771330372
+M	m00253	576614	82	3593411856
+M	m00254	576697	17	846529951
+M	m00255	576715	39	4062645319
+M	m00256	576755	17	904005051
+M	m00257	576773	170	2180464029
+M	m00258	576944	164	2587768996
+M	m00259	577109	385	1170245342
+M	m00260	577495	431	2626853083
+M	m00261	577927	270	2245091178
+M	m00262	578198	14	550306945
+M	m00263	578213	6	97649068
+M	m00264	578220	11	344523642
+M	m00265	578232	10	280953628
+M	m00266	578243	15	664798476
+M	m00267	578259	8	180028022
+M	m00268	578268	7	133497348
+M	m00269	578276	17	781059366
+M	m00270	578294	287	3346623133
+M	m00271	578582	1542	861332016
+M	m00272	580125	100	3496813201
+M	m00273	580226	5137	419809710
+M	m00274	585364	731	319747508
+M	m00275	586096	959	330120841
+M	m00276	587056	38	4132441346
+M	m00277	587095	605	4206156230
+M	m00278	587701	292	2453365973
+M	m00279	587994	99	3133678127
+M	m00280	588094	148	3347853959
+M	m00281	588243	3061	1493615734
+M	m00282	591305	1598	2132946582
+M	m00283	592904	7699	119854484
+M	m00284	600604	21	1248855712
+M	m00285	600626	3583	1536611429
+M	m00286	604210	439	1190366709
+M	m00287	604650	272	320888691
+M	m00288	604923	247	2300989415
+M	m00289	605171	1480	772602905
+M	m00290	606652	521	3108289470
+M	m00291	607174	223	1002915704
+M	m00292	607398	745	1891755449
+M	m00293	608144	364	219179629
+M	m00294	608509	2008	1941138160
+M	m00295	610518	3570	4259990205
+M	m00296	614089	4338	742052269
+M	m00297	618428	2861	1335278964
+M	m00298	621290	17	968296011
+M	m00299	621308	24	1746733075
+M	m00300	621333	3	16842880
+M	m00301	621337	5	78971276
+M	m00302	621343	8	173474356
+M	m00303	621352	54	1175981113
+M	m00304	621407	97	494280457
+M	m00305	621505	145	3896781210
+M	m00306	621651	93	3878493217
+M	m00307	621745	114	2849644559
+M	m00308	621860	6	110232032
+M	m00309	621867	19	1067255391
+M	m00310	621887	21	1461913523
+M	m00311	621909	59	2791052976
+M	m00312	621969	24	1839925289
+M	m00313	621994	81	1565661668
+M	m00314	622076	130	1008283334
+M	m00315	622207	270	657874712
+M	m00316	622478	434	1969068350
+M	m00317	622913	965	4225652048
+M	m00318	623879	4885	1112122401
+M	m00319	628765	178	1318796826
+M	m00320	628944	7262	4137734245
+M	m00321	636207	27	2213874016
+M	m00322	636235	96	2011439789
+M	m00323	636332	215	1023167517
+M	m00324	636548	7084	2150029147
+M	m00325	643633	44	1138364003
+M	m00326	643678	402	2614069957
+M	m00327	644081	5367	1208346455
+M	m00328	649449	82	2653166699
+M	m00329	649532	568	2114439008
+M	m00330	650101	4035	2292215179
+M	m00331	654137	2645	1459071323
+M	m00332	656783	6354	4282285135
+M	m00333	663138	8	137822641
+M	m00334	663147	58	1651446973
+M	m00335	663206	6641	3212656226
+M	m00336	669848	524	3664026682
+M	m00337	670373	33	3157068497
+M	m00338	670407	1695	4090968316
+M	m00339	672103	3644	1289611000
+M	m00340	675748	224	2976730694
+M	m00341	675973	585	2935736906
+M	m00342	676559	349	2457237262
+M	m00343	676909	593	301712865
+M	m00344	677503	3099	3587551900
+M	m00345	680603	967	2151429966
+M	m00346	681571	118	2058496090
+M	m00347	681690	631	2437341108
+M	m00348	682322	5	66519356
+M	m00349	682328	116	168699770
+M	m00350	682445	4959	2976549125
+M	m00351	687405	6589	1337551890
+M	m00352	693995	6397	1958978552
+M	m00353	700393	1812	3255269748
+M	m00354	702206	89	4277804282
+M	m00355	702296	609	889117870
+M	m00356	702906	3429	1244957875
+M	m00357	706336	87	433462882
+M	m00358	706424	1203	3434383450
+M	m00359	707628	8	144441907
+M	m00360	707637	8	190775903
+M	m00361	707646	30	2841053935
+M	m00362	707677	34	3858173083
+M	m00363	707712	31	2067466398
+M	m00364	707744	329	189557839
+M	m00365	708074	1461	469167429
+M	m00366	709536	505	1259843099
+M	m00367	710042	215	1012483995
+M	m00368	710258	13	393216940
+M	m00369	710272	6170	1068991840
+M	m00370	716443	1884	3967514723
+M	m00371	718328	90	2233015987
+M	m00372	718419	3704	388882007
+M	m00373	722124	826	2181890176
+M	m00374	722951	5038	4165976339
+M	m00375	727990	1484	285671642
+M	m00376	729475	4496	2132796153
+M	m00377	733972	3395	2528419820
+M	m00378	737368	2420	3543943899
+M	m00379	739789	680	1111156744
+M	m00380	740470	998	3888539405
+M	m00381	741469	4076	1925684335
+M	m00382	745546	927	3873914255
+M	m00383	746474	32	3311209443
+M	m00384	746507	3101	1992764663
+M	m00385	749609	952	2015314398
+M	m00386	750562	187	3300671414
+M	m00387	750750	243	13059504
+M	m00388	750994	5252	2938737771
+M	m00389	756247	1333	1860161918
+M	m00390	757581	2667	2397018603
+M	m00391	760249	1659	1130445394
+M	m00392	761909	2528	4173815421
+M	m00393	764438	236	1401443679
+M	m00394	764675	2820	4030960432
+M	m00395	767496	182	269958229
+M	m00396	767679	1025	818239247
+M	m00397	768705	3932	1966675426
+M	m00398	772638	78	3281590466
+M	m00399	772717	72	2499156219
+M	m00400	772790	3760	1201441498
+M	m00401	776551	1597	741349895
+M	m00402	778149	21	1329071910
+M	m00403	778171	36	4163112136
+M	m00404	778208	245	865424936
+M	m00405	778454	103	1173758908
+M	m00406	778558	21	1420756907
+M	m00407	778580	15	703464803
+M	m00408	778596	593	262981837
+M	m00409	779190	9	225772179
+M	m00410	779200	172	2731620840
+M	m00411	779373	14	547882068
+M	m00412	779388	18	944834053
+M	m00413	779407	16	727319861
+M	m00414	779424	13	470090745
+M	m00415	779438	19	1035404864
+M	m00416	779458	20	1153173209
+M	m00417	779479	7	141754877
+M	m00418	779487	12	400163724
+M	m00419	779500	10	279184116
+M	m00420	779511	49	3348500888
+M	m00421	779561	5589	1402330301
+M	m00422	785151	102	4194050986
+M	m00423	785254	5353	1200533639
+M	m00424	790608	5292	127678671
+M	m00425	795901	1908	1633708706
+M	m00426	797810	774	1262814615
+M	m00427	798585	2516	1017995881
+M	m00428	801102	160	715404945
+M	m00429	801263	264	1214929823
+M	m00430	801528	851	3810076214
+M	m00431	802380	117	2123113185
+M	m00432	802498	13	502137919
+M	m00433	802512	630	3729774149
+M	m00434	803143	14	636814584
+M	m00435	803158	1160	2715914852
+M	m00436	804319	925	722224053
+M	m00437	805245	1102	874805110
+M	m00438	806348	1618	3786481656
+M	m00439	807967	1975	4160459906
+M	m00440	809943	443	3710096174
+M	m00441	810387	1568	388104979
+M	m00442	811956	21	1302595359
+M	m00443	811978	983	1693669687
+M	m00444	812962	98	679682993
+M	m00445	813061	1169	1657579515
+M	m00446	814231	119	2892310771
+M	m00447	814351	710	437188290
+M	m00448	815062	377	1924368082
+M	m00449	815440	177	529939621
+M	m00450	815618	3396	876068704
+M	m00451	819015	81	2313231473
+M	m00452	819097	5158	1406007174
+M	m00453	824256	219	2100315209
+M	m00454	824476	266	3945814243
+M	m00455	824743	966	481185655
+M	m00456	825710	124	2346658306
+M	m00457	825835	213	2192918051
+M	m00458	826049	278	1309040189
+M	m00459	826328	1919	3154418873
+M	m00460	828248	109	4212729088
+M	m00461	828358	768	1048115002
+M	m00462	829127	183	447364616
+M	m00463	829311	1599	274936415
+M	m00464	830911	1448	1836251063
+M	m00465	832360	128	3419679649
+M	m00466	832489	75	3941866036
+M	m00467	832565	4973	1862502185
+M	m00468	837539	1107	1762086340
+M	m00469	838647	3847	3811449417
+M	m00470	842495	5158	384508350
+M	m00471	847654	560	2872557079
+M	m00472	848215	208	1637894006
+M	m00473	848424	3411	3487739069
+M	m00474	851836	312	1012625745
+M	m00475	852149	4936	29206560
+M	m00476	857086	49	3288863126
+M	m00477	857136	90	3402571738
+M	m00478	857227	97	1913004335
+M	m00479	857325	179	620837342
+M	m00480	857505	619	3966488751
+M	m00481	858125	108	3972998610
+M	m00482	858234	222	4113060233
+M	m00483	858457	75	3879672482
+M	m00484	858533	276	93544331
+M	m00485	858810	614	2401621450
+M	m00486	859425	34	3438087187
+M	m00487	859460	6	105710036
+M	m00488	859467	177	1040727895
+M	m00489	859645	98	1863655934
+M	m00490	859744	30	1877280476
+M	m00491	859775	3028	2718120123
+M	m00492	862804	1359	2319638234
+M	m00493	864164	68	993073288
+M	m00494	864233	4780	2408253012
+M	m00495	869014	4801	2757455445
+M	m00496	873816	3168	3078365831
+M	m00497	876985	1310	845141290
+M	m00498	878296	104	2606376079
+M	m00499	878401	1207	965251653
+M	m00500	879609	2230	3020036034
+M	m00501	881840	787	3436254093
+M	m00502	882628	18	967050738
+M	m00503	882647	4753	134109584
+M	m00504	887401	803	4052418262
+M	m00505	888205	2943	915588454
+M	m00506	891149	733	3670858309
+M	m00507	891883	385	2734850861
+M	m00508	892269	4270	3067343345
+M	m00509	896540	462	315588143
+M	m00510	897003	2582	290488263
+M	m00511	899586	1278	2345453283
+M	m00512	900865	198	3254076047
+M	m00513	901064	590	2263863068
+M	m00514	901655	39	4276489398
+M	m00515	901695	1555	84345364
+M	m00516	903251	1633	3079150791
+M	m00517	904885	4633	1850498750
+M	m00518	909519	1721	3026409013
+M	m00519	911241	2650	2138160209
+M	m00520	913892	78	1055923079
+M	m00521	913971	381	2331410935
+M	m00522	914353	165	2875603865
+M	m00523	914519	1352	2216673219
+M	m00524	915872	1985	3991978405
+M	m00525	917858	363	49380726
+M	m00526	918222	4034	2237160399
+M	m00527	922257	1725	2662599190
+M	m00528	923983	2756	3009179636
+M	m00529	926740	126	280046515
+M	m00530	926867	4	45220116
+M	m00531	926872	3986	934444555
+M	m00532	930859	2941	169672087
+M	m00533	933801	1270	1656275739
+M	m00534	935072	185	3997712309
+M	m00535	935258	88	3671596264
+M	m00536	935347	73	2309953632
+M	m00537	935421	189	2031306035
+M	m00538	935611	22	1449199476
+M	m00539	935634	106	518334005
+M	m00540	935741	3237	3963839694
+M	m00541	938979	40	4236708859
+M	m00542	939020	793	1228345275
+M	m00543	939814	362	2879421187
+M	m00544	940177	223	1418151981
+M	m00545	940401	242	1099584168
+M	m00546	940644	2697	2141967039
+M	m00547	943342	199	2315668379
+M	m00548	943542	26	2004682988
+M	m00549	943569	7	146014756
+M	m00550	943577	201	1771259118
+M	m00551	943779	85	3632798900
+M	m00552	943865	730	1483668957
+M	m00553	944596	506	2307829611
+M	m00554	945103	209	2133150723
+M	m00555	945313	8	200999554
+M	m00556	945322	572	1727382769
+M	m00557	945895	34	3477015589
+M	m00558	945930	267	288513906
+M	m00559	946198	367	2847308347
+M	m00560	946566	279	3927991142
+M	m00561	946846	547	396082915
+M	m00562	947394	6	90440100
+M	m00563	947401	27	2225211631
+M	m00564	947429	278	2288541084
+M	m00565	947708	241	2678412168
+M	m00566	947950	49	2709786779
+M	m00567	948000	334	1656058789
+M	m00568	948335	596	2340082880
+M	m00569	948932	97	786112365
+M	m00570	949030	75	632167327
+M	m00571	949106	99	1894260799
+M	m00572	949206	77	1572084889
+M	m00573	949284	34	3173190248
+M	m00574	949319	4	36503764
+M	m00575	949324	72	1303189198
+M	m00576	949397	50	2948534479
+M	m00577	949448	15	557253770
+M	m00578	949464	123	3465685696
+M	m00579	949588	56	4189590408
+M	m00580	949645	202	3044951617
+M	m00581	949848	139	688336789
+M	m00582	949988	96	250224382
+M	m00583	950085	431	3436616256
+M	m00584	950517	3421	4227830342
+M	m00585	953939	302	3299501824
+M	m00586	954242	342	3901714745
+M	m00587	954585	264	1844599929
+M	m00588	954850	2633	17663996
+M	m00589	957484	36	3623816082
+M	m00590	957521	3465	2381688295
+M	m00591	960987	222	310661635
+M	m00592	961210	224	2335396368
+M	m00593	961435	363	2597419871
+M	m00594	961799	1160	3065748476
+M	m00595	962960	17	753993064
+M	m00596	962978	229	3577694984
+M	m00597	963208	158	1296709019
+M	m00598	963367	1054	1311664182
+M	m00599	964422	287	42492798
+M	m00600	964710	100	1190928250
+M	m00601	964811	1122	2369739163
+M	m00602	965934	1663	1154537965
+M	m00603	967598	1027	3158985155
+M	m00604	968626	154	1976643779
+M	m00605	968781	205	290670010
+M	m00606	968987	171	1282226547
+M	m00607	969159	52	3922268846
+M	m00608	969212	27	2075265238
+M	m00609	969240	89	1018240362
+M	m00610	969330	48	3231322636
+M	m00611	969379	190	678314347
+M	m00612	969570	501	2832179329
+M	m00613	970072	966	3224588890
+M	m00614	971039	4119	1752731449
+M	m00615	975159	3979	2279958996
+M	m00616	979139	70	1648367645
+M	m00617	979210	162	2943825429
+M	m00618	979373	1871	3330563793
+M	m00619	981245	1499	108655992
+M	m00620	982745	2426	1009525276
+M	m00621	985172	57	447615573
+M	m00622	985230	1252	1493479286
+M	m00623	986483	151	3648206078
+M	m00624	986635	266	2954123847
+M	m00625	986902	435	4954091
+M	m00626	987338	1012	1254054777
+M	m00627	988351	333	437154453
+M	m00628	988685	305	3701368894
+M	m00629	988991	167	4165155010
+M	m00630	989159	337	128546910
+M	m00631	989497	104	2085626738
+M	m00632	989602	16	804062641
+M	m00633	989619	143	3253154721
+M	m00634	989763	640	725606723
+M	m00635	990404	62	881529574
+M	m00636	990467	1996	619688947
+M	m00637	992464	2331	1988165406
+M	m00638	994796	21	1049494988
+M	m00639	994818	94	4195949771
+M	m00640	994913	1155	2253099230
+M	m00641	996069	607	2187707467
+M	m00642	996677	3177	972112941
+M	m00643	999855	1699	1955678726
+M	m00644	1001555	1851	830047130
+M	m00645	1003407	3975	3395711926
+M	m00646	1007383	3962	3217787235
+M	m00647	1011346	1258	2480063188
+M	m00648	1012605	278	997677062
+M	m00649	1012884	953	3504756280
+M	m00650	1013838	23	1575225280
+M	m00651	1013862	336	45051173
+M	m00652	1014199	80	1817910177
+M	m00653	1014280	173	2241281891
+M	m00654	1014454	817	1905663454
+M	m00655	1015272	3033	645998697
+M	m00656	1018306	3959	2305129407
+M	m00657	1022266	718	1986064098
+M	m00658	1022985	387	4087187672
+M	m00659	1023373	2603	1089760308
+M	m00660	1025977	492	162309181
+M	m00661	1026470	3324	1273058694
+M	m00662	1029795	17	865535382
+M	m00663	1029813	665	1042474361
+M	m00664	1030479	2183	1295569599
+M	m00665	1032663	574	1776403836
+M	m00666	1033238	166	992623149
+M	m00667	1033405	3892	3921419984
+M	m00668	1037298	883	855914405
+M	m00669	1038182	147	738669848
+M	m00670	1038330	1485	3907977274
+M	m00671	1039816	20	1163265576
+M	m00672	1039837	17	892143079
+M	m00673	1039855	544	1228470
+M	m00674	1040400	5	50463001
+M	m00675	1040406	143	8270221
+M	m00676	1040550	847	1128999120
+M	m00677	1041398	347	573339923
+M	m00678	1041746	14	626656458
+M	m00679	1041761	727	2544167889
+M	m00680	1042489	16	534709298
+M	m00681	1042506	1303	1485032975
+M	m00682	1043810	3248	1496547319
+M	m00683	1047059	336	3348659815
+M	m00684	1047396	75	4209777259
+M	m00685	1047472	415	3254095265
+M	m00686	1047888	1010	1629972064
+M	m00687	1048899	32	2781415856
+M	m00688	1048932	507	1808637482
+M	m00689	1049440	890	1303522645
+M	m00690	1050331	199	2643543077
+M	m00691	1050531	284	79257238
+M	m00692	1050816	13	560071848
+M	m00693	1050830	106	1257972635
+M	m00694	1050937	2874	2878465703
+M	m00695	1053812	3701	2891701757
+M	m00696	1057514	716	2449143280
+M	m00697	1058231	547	3787964628
+M	m00698	1058779	263	3957743836
+M	m00699	1059043	1868	2426054633
+M	m00700	1060912	421	1110216987
+M	m00701	1061334	517	3920081228
+M	m00702	1061852	159	1059795517
+M	m00703	1062012	840	1735793007
+M	m00704	1062853	161	1217869477
+M	m00705	1063015	831	3000118237
+M	m00706	1063847	486	2857805899
+M	m00707	1064334	103	1434592253
+M	m00708	1064438	1053	583036955
+M	m00709	1065492	10	286917406
+M	m00710	1065503	944	1980056657
+M	m00711	1066448	2094	1178115968
+M	m00712	1068543	229	567824996
+M	m00713	1068773	14	572982353
+M	m00714	1068788	101	241902572
+M	m00715	1068890	364	1247641567
+M	m00716	1069255	2465	153299918
+M	m00717	1071721	22	1220281971
+M	m00718	1071744	87	2469338949
+M	m00719	1071832	138	3067554529
+M	m00720	1071971	15	706020624
+M	m00721	1071987	13	447677355
+M	m00722	1072001	3406	1895921748
+M	m00723	1075408	621	227661670
+M	m00724	1076030	881	1839280678
+M	m00725	1076912	11	362677099
+M	m00726	1076924	518	3708659562
+M	m00727	1077443	709	2420242152
+M	m00728	1078153	102	585704033
+M	m00729	1078256	1140	4045833659
+M	m00730	1079397	675	897248200
+M	m00731	1080073	1584	1760957655
+M	m00732	1081658	7	114753953
+M	m00733	1081666	39	3526363716
+M	m00734	1081706	48	2828865887
+M	m00735	1081755	18	1031669376
+M	m00736	1081774	14	597034135
+M	m00737	1081789	3453	3566125128
+M	m00738	1085243	3651	3932196938
+M	m00739	1088895	166	1245854290
+M	m00740	1089062	3322	2663486559
+M	m00741	1092385	91	3632143463
+M	m00742	1092477	5	77857166
+M	m00743	1092483	105	2509776018
+M	m00744	1092589	117	510010657
+M	m00745	1092707	642	3576811474
+M	m00746	1093350	1823	1319262149
+M	m00747	1095174	2841	38501749
+M	m00748	1098016	24	1240467092
+M	m00749	1098041	24	1085474202
+M	m00750	1098066	425	2070906563
+M	m00751	1098492	1224	3831935236
+M	m00752	1099717	354	1918401973
+M	m00753	1100072	1585	4054067203
+M	m00754	1101658	10	297206629
+M	m00755	1101669	3477	257399914
+M	m00756	1105147	202	4270996649
+M	m00757	1105350	107	2984255064
+M	m00758	1105458	1831	2439004423
+M	m00759	1107290	198	3603444995
+M	m00760	1107489	19	914228405
+M	m00761	1107509	168	2102540082
+M	m00762	1107678	2063	2193004570
+M	m00763	1109742	1244	2574300577
+M	m00764	1110987	2643	2871441237
+M	m00765	1113631	610	3917997186
+M	m00766	1114242	1161	698978087
+M	m00767	1115404	927	3781573199
+M	m00768	1116332	1183	2148310067
+M	m00769	1117516	177	839794110
+M	m00770	1117694	1118	1554087498
+M	m00771	1118813	1857	2991686825
+M	m00772	1120671	78	1049631607
+M	m00773	1120750	3266	2941406963
+M	m00774	1124017	1497	823003209
+M	m00775	1125515	1855	331042390
+M	m00776	1127371	107	4204011476
+M	m00777	1127479	11	390792152
+M	m00778	1127491	14	632816909
+M	m00779	1127506	3427	2752815338
+M	m00780	1130934	211	1046824480
+M	m00781	1131146	3100	3509438003
+M	m00782	1134247	3380	2227472173
+M	m00783	1137628	3097	3697348356
+M	m00784	1140726	28	2255751348
+M	m00785	1140755	210	1684618700
+M	m00786	1140966	138	1434397354
+M	m00787	1141105	121	4059637611
+M	m00788	1141227	10	317195125
+M	m00789	1141238	44	763104736
+M	m00790	1141283	195	2257143476
+M	m00791	1141479	2556	4210722879
+M	m00792	1144036	773	443153686
+M	m00793	1144810	299	236018120
+M	m00794	1145110	1755	2746171163
+M	m00795	1146866	885	3299553976
+M	m00796	1147752	242	2133612336
+M	m00797	1147995	699	2526804208
+M	m00798	1148695	924	3483581997
+M	m00799	1149620	741	2422733847
+M	m00800	1150362	2278	59239778
+M	m00801	1152641	228	887705530
+M	m00802	1152870	26	1765148457
+M	m00803	1152897	13	459539368
+M	m00804	1152911	848	83107906
+M	m00805	1153760	785	2123501368
+M	m00806	1154546	207	850676703
+M	m00807	1154754	171	220872398
+M	m00808	1154926	3099	2266372745
+M	m00809	1158026	3230	2519931884
+M	m00810	1161257	526	68859838
+M	m00811	1161784	765	896394414
+M	m00812	1162550	281	948522433
+M	m00813	1162832	1073	1149594816
+M	m00814	1163906	245	2416726166
+M	m00815	1164152	2544	765610319
+M	m00816	1166697	3202	3605025322
+M	m00817	1169900	6	95027608
+M	m00818	1169907	12	395314037
+M	m00819	1169920	73	3756202839
+M	m00820	1169994	202	1232816071
+M	m00821	1170197	17	734266581
+M	m00822	1170215	10	243466899
+M	m00823	1170226	15	600900795
+M	m00824	1170242	15	707462519
+M	m00825	1170258	6	57999638
+M	m00826	1170265	8	181469816
+M	m00827	1170274	12	432800751
+M	m00828	1170287	11	314049291
+M	m00829	1170299	285	2153472259
+M	m00830	1170585	2753	1702281605
+M	m00831	1173339	917	3561831249
+M	m00832	1174257	1982	925217094
+M	m00833	1176240	29	2547386903
+M	m00834	1176270	2833	3866015277
+M	m00835	1179104	2057	55160704
+M	m00836	1181162	402	2886502892
+M	m00837	1181565	561	3298672562
+M	m00838	1182127	17	760612152
+M	m00839	1182145	91	4011073882
+M	m00840	1182237	548	397065801
+M	m00841	1182786	57	561123903
+M	m00842	1182844	20	954467759
+M	m00843	1182865	107	528490899
+M	m00844	1182973	699	1757538831
+M	m00845	1183673	409	1539934356
+M	m00846	1184083	888	2212042855
+M	m00847	1184972	1579	3585208884
+M	m00848	1186552	163	3196336051
+M	m00849	1186716	144	3876074549
+M	m00850	1186861	30	2349730122
+M	m00851	1186892	15	700777790
+M	m00852	1186908	102	2684036572
+M	m00853	1187011	226	3009563285
+M	m00854	1187238	299	1032217224
+M	m00855	1187538	18	855639439
+M	m00856	1187557	12	468583470
+M	m00857	1187570	15	745538957
+M	m00858	1187586	51	3564638685
+M	m00859	1187638	87	927473073
+M	m00860	1187726	17	907216375
+M	m00861	1187744	188	1208762513
+M	m00862	1187933	2132	2464733105
+M	m00863	1190066	261	2362724520
+M	m00864	1190328	303	1986029879
+M	m00865	1190632	2338	3295947301
+M	m00866	1192971	66	165549765
+M	m00867	1193038	307	1864853620
+M	m00868	1193346	2242	1295113750
+M	m00869	1195589	4	28770478
+M	m00870	1195594	246	672813519
+M	m00871	1195841	193	2872132784
+M	m00872	1196035	80	605821646
+M	m00873	1196116	769	2307721747
+M	m00874	1196886	1094	3864949903
+M	m00875	1197981	22	1383204544
+M	m00876	1198004	1186	2770441553
+M	m00877	1199191	1008	134241511
+M	m00878	1200200	506	1709946839
+M	m00879	1200707	71	3755807996
+M	m00880	1200779	947	1839413141
+M	m00881	1201727	59	3840151293
+M	m00882	1201787	13	317588169
+M	m00883	1201801	227	964446658
+M	m00884	1202029	605	2495532951
+M	m00885	1202635	873	1619403712
+M	m00886	1203509	131	2654154066
+M	m00887	1203641	1022	2444907200
+M	m00888	1204664	316	3274339490
+M	m00889	1204981	171	3457171072
+M	m00890	1205153	76	3812694399
+M	m00891	1205230	25	1692796921
+M	m00892	1205256	1152	3900279874
+M	m00893	1206409	277	886857804
+M	m00894	1206687	184	1187135235
+M	m00895	1206872	16	817563075
+M	m00896	1206889	83	2476940299
+M	m00897	1206973	169	3199548199
+M	m00898	1207143	2209	1754333849
+M	m00899	1209353	453	3713767734
+M	m00900	1209807	2622	1495235173
+M	m00901	1212430	314	376008028
+M	m00902	1212745	2878	2056711780
+M	m00903	1215624	161	3603707995
+M	m00904	1215786	654	11986064
+M	m00905	1216441	1237	1292744155
+M	m00906	1217679	365	2963637224
+M	m00907	1218045	2881	1060128227
+M	m00908	1220927	114	1855858136
+M	m00909	1221042	364	2928114686
+M	m00910	1221407	38	188747094
+M	m00911	1221446	184	145047463
+M	m00912	1221631	16	427229983
+M	m00913	1221648	197	177226438
+M	m00914	1221846	1306	2959382480
+M	m00915	1223153	41	1062276876
+M	m00916	1223195	36	3707964362
+M	m00917	1223232	1096	3586883516
+M	m00918	1224329	340	3372051327
+M	m00919	1224670	196	4011410644
+M	m00920	1224867	116	3977586465
+M	m00921	1224984	103	1150493535
+M	m00922	1225088	10	247071411
+M	m00923	1225099	842	3546491033
+M	m00924	1225942	481	1046718377
+M	m00925	1226424	33	3026914015
+M	m00926	1226458	609	787404127
+M	m00927	1227068	902	3197254349
+M	m00928	1227971	267	3004717963
+M	m00929	1228239	207	2499429657
+M	m00930	1228447	1096	2526968657
+M	m00931	1229544	2522	2196400798
+M	m00932	1232067	175	4142088328
+M	m00933	1232243	250	3502724362
+M	m00934	1232494	2575	575639900
+M	m00935	1235070	2792	3321613591
+M	m00936	1237863	15	756417914
+M	m00937	1237879	119	356786577
+M	m00938	1237999	9	216859283
+M	m00939	1238009	2268	4012906929
+M	m00940	1240278	2574	3730785242
+M	m00941	1242853	50	2743603316
+M	m00942	1242904	100	1807425486
+M	m00943	1243005	686	446558860
+M	m00944	1243692	1758	444947028
+M	m00945	1245451	2665	1920944442
+M	m00946	1248117	10	239928023
+M	m00947	1248128	847	1463685849
+M	m00948	1248976	12	316801809
+M	m00949	1248989	1206	3684600041
+M	m00950	1250196	2048	880858367
+M	m00951	1252245	466	574658766
+M	m00952	1252712	2813	1127540857
+M	m00953	1255526	347	854488719
+M	m00954	1255874	128	1096493410
+M	m00955	1256003	67	887887900
+M	m00956	1256071	29	2121205949
+M	m00957	1256101	14	324797107
+M	m00958	1256116	13	563741903
+M	m00959	1256130	329	2963630133
+M	m00960	1256460	313	4202191209
+M	m00961	1256774	214	2382317808
+M	m00962	1256989	420	104435189
+M	m00963	1257410	2071	2746017251
+M	m00964	1259482	95	1854415258
+M	m00965	1259578	1641	2653565297
+M	m00966	1261220	255	1541298662
+M	m00967	1261476	583	1772012460
+M	m00968	1262060	13	522191996
+M	m00969	1262074	306	1815046647
+M	m00970	1262381	73	2387548239
+M	m00971	1262455	27	2274101588
+M	m00972	1262483	1019	2635296009
+M	m00973	1263503	1370	233103845
+M	m00974	1264874	2669	2648548199
+M	m00975	1267544	51	2988118001
+M	m00976	1267596	19	1169688135
+M	m00977	1267616	16	648676491
+M	m00978	1267633	80	2281446496
+M	m00979	1267714	174	3235265838
+M	m00980	1267889	1097	3686425432
+M	m00981	1268987	1301	1405203891
+M	m00982	1270289	61	1373311462
+M	m00983	1270351	13	469894058
+M	m00984	1270365	10	311100238
+M	m00985	1270376	66	4191098515
+M	m00986	1270443	75	2587760730
+M	m00987	1270519	1318	1714999496
+M	m00988	1271838	77	834935526
+M	m00989	1271916	160	873017305
+M	m00990	1272077	41	742067725
+M	m00991	1272119	74	3386055174
+M	m00992	1272194	136	267530297
+M	m00993	1272331	1500	165283855
+M	m00994	1273832	89	3821149357
+M	m00995	1273922	925	1910258055
+M	m00996	1274848	2767	2331292075
+M	m00997	1277616	165	2053519528
+M	m00998	1277782	2407	2036416131
+M	m00999	1280190	2182	3000295169
+M	m01000	1282373	152	3131127603
+M	m01001	1282526	80	218438232
+M	m01002	1282607	67	2707952956
+M	m01003	1282675	1964	1349233036
+M	m01004	1284640	1396	3704199973
+M	m01005	1286037	1000	3061528975
+M	m01006	1287038	74	2911836531
+M	m01007	1287113	35	3471706980
+M	m01008	1287149	597	1291372029
+M	m01009	1287747	48	2574651447
+M	m01010	1287796	536	1242347943
+M	m01011	1288333	310	1602971704
+M	m01012	1288644	51	1812925856
+M	m01013	1288696	2170	2822955531
+M	m01014	1290867	83	3597147421
+M	m01015	1290951	1495	1611398679
+M	m01016	1292447	25	1835403467
+M	m01017	1292473	44	1378619286
+M	m01018	1292518	11	374801292
+M	m01019	1292530	290	4035078621
+M	m01020	1292821	69	1238833071
+M	m01021	1292891	435	2778765857
+M	m01022	1293327	12	409011188
+M	m01023	1293340	354	3067440432
+M	m01024	1293695	406	2725478743
+M	m01025	1294102	803	151002195
+M	m01026	1294906	2615	945195819
+M	m01027	1297522	1442	4004051463
+M	m01028	1298965	415	56725504
+M	m01029	1299381	40	4087155562
+M	m01030	1299422	5	54657297
+M	m01031	1299428	33	3508407416
+M	m01032	1299462	82	635509065
+M	m01033	1299545	106	3721471421
+M	m01034	1299652	2344	1500981233
+M	m01035	1301997	32	3138128730
+M	m01036	1302030	2303	2278238013
+M	m01037	1304334	2253	2058941923
+M	m01038	1306588	80	1036065576
+M	m01039	1306669	1812	1318879190
+M	m01040	1308482	8	211813058
+M	m01041	1308491	19	1094583951
+M	m01042	1308511	35	3851291712
+M	m01043	1308547	104	3386058099
+M	m01044	1308652	2568	3894837698
+M	m01045	1311221	15	675874056
+M	m01046	1311237	346	1002863235
+M	m01047	1311584	1097	3300552599
+M	m01048	1312682	201	3661906308
+M	m01049	1312884	279	950427204
+M	m01050	1313164	328	3454497581
+M	m01051	1313493	2119	51763665
+M	m01052	1315613	2670	991952550
+M	m01053	1318284	2675	2620195308
+M	m01054	1320960	2645	834296937
+M	m01055	1323606	332	323776892
+M	m01056	1323939	44	1325928276
+M	m01057	1323984	501	4251951159
+M	m01058	1324486	338	335241826
+M	m01059	1324825	297	93021968
+M	m01060	1325123	116	1374628067
+M	m01061	1325240	54	2738032465
+M	m01062	1325295	82	3081575532
+M	m01063	1325378	105	3670287730
+M	m01064	1325484	32	2501904866
+M	m01065	1325517	1362	4276996026
+M	m01066	1326880	2403	3351594649
+M	m01067	1329284	2028	2317783633
+M	m01068	1331313	286	2775671582
+M	m01069	1331600	88	1776754513
+M	m01070	1331689	769	838995728
+M	m01071	1332459	938	413877528
+M	m01072	1333398	256	1452233114
+M	m01073	1333655	2228	3632917936
+M	m01074	1335884	35	3601009676
+M	m01075	1335920	968	2534623126
+M	m01076	1336889	74	3053656068
+M	m01077	1336964	11	217580095
+M	m01078	1336976	795	3470135879
+M	m01079	1337772	34	3419868041
+M	m01080	1337807	2261	2963537470
+M	m01081	1340069	77	557783811
+M	m01082	1340147	1101	3247076271
+M	m01083	1341249	1109	523208316
+M	m01084	1342359	266	551640575
+M	m01085	1342626	656	2823741944
+M	m01086	1343283	242	894259841
+M	m01087	1343526	382	912295446
+M	m01088	1343909	98	1815289988
+M	m01089	1344008	2359	2304588353
+M	m01090	1346368	506	3269306653
+M	m01091	1346875	1748	3436931399
+M	m01092	1348624	2363	2398681208
+M	m01093	1350988	46	1642991481
+M	m01094	1351035	2206	3389521620
+M	m01095	1353242	319	2406113419
+M	m01096	1353562	1738	3290975785
+M	m01097	1355301	143	835727767
+M	m01098	1355445	761	953682141
+M	m01099	1356207	1292	824496355
+M	m01100	1357500	186	3184737515
+M	m01101	1357687	1835	1724408826
+M	m01102	1359523	2432	3924121165
+M	m01103	1361956	1215	2160693598
+M	m01104	1363172	1069	556227415
+M	m01105	1364242	2016	2263670141
+M	m01106	1366259	126	1991388581
+M	m01107	1366386	2251	2524577991
+M	m01108	1368638	1445	3243504727
+M	m01109	1370084	364	1159168934
+M	m01110	1370449	35	3990752561
+M	m01111	1370485	66	4190639740
+M	m01112	1370552	2237	1886327412
+M	m01113	1372790	664	3380272066
+M	m01114	1373455	1445	4112248431
+M	m01115	1374901	171	1858154738
+M	m01116	1375073	38	378146263
+M	m01117	1375112	1663	1922579801
+M	m01118	1376776	34	3454077958
+M	m01119	1376811	1593	1207442351
+M	m01120	1378405	35	3978825036
+M	m01121	1378441	41	260705578
+M	m01122	1378483	509	2607914359
+M	m01123	1378993	824	1850743511
+M	m01124	1379818	163	4047647665
+M	m01125	1379982	297	2003329416
+M	m01126	1380280	952	1431194489
+M	m01127	1381233	928	1584675828
+M	m01128	1382162	78	599136999
+M	m01129	1382241	81	1992235756
+M	m01130	1382323	43	1067585140
+M	m01131	1382367	370	4035543422
+M	m01132	1382738	1376	1332598662
+M	m01133	1384115	1127	2275110923
+M	m01134	1385243	394	25134555
+M	m01135	1385638	525	1197976257
+M	m01136	1386164	920	1057700411
+M	m01137	1387085	119	1836065331
+M	m01138	1387205	28	2416249244
+M	m01139	1387234	633	1469701403
+M	m01140	1387868	1047	1801007174
+M	m01141	1388916	1137	141834901
+M	m01142	1390054	2142	4103266276
+M	m01143	1392197	292	3628029477
+M	m01144	1392490	1733	3588773107
+M	m01145	1394224	1061	4090388724
+M	m01146	1395286	831	747639835
+M	m01147	1396118	131	1860644690
+M	m01148	1396250	638	3072446271
+M	m01149	1396889	450	1977520205
+M	m01150	1397340	125	499133599
+M	m01151	1397466	784	2625239904
+M	m01152	1398251	1216	2987957018
+M	m01153	1399468	8	123273710
+M	m01154	1399477	393	251954220
+M	m01155	1399871	566	1261742447
+M	m01156	1400438	614	503693965
+M	m01157	1401053	221	780487915
+M	m01158	1401275	532	2650978321
+M	m01159	1401808	906	1474379348
+M	m01160	1402715	157	3449108195
+M	m01161	1402873	295	2777047359
+M	m01162	1403169	32	2914060946
+M	m01163	1403202	62	3424392743
+M	m01164	1403265	18	1102907032
+M	m01165	1403284	637	2998919742
+M	m01166	1403922	2212	1157561667
+M	m01167	1406135	2059	10791088
+M	m01168	1408195	2193	152895303
+M	m01169	1410389	88	1776557905
+M	m01170	1410478	36	3955756231
+M	m01171	1410515	1069	2923327865
+M	m01172	1411585	466	3932070356
+M	m01173	1412052	2180	2216746428
+M	m01174	1414233	390	884311565
+M	m01175	1414624	167	2134193694
+M	m01176	1414792	1408	2364924529
+M	m01177	1416201	73	2626689358
+M	m01178	1416275	1563	4021884009
+M	m01179	1417839	81	2361007105
+M	m01180	1417921	138	698036063
+M	m01181	1418060	1220	244294313
+M	m01182	1419281	275	4214513928
+M	m01183	1419557	2110	1378795171
+M	m01184	1421668	96	2060984897
+M	m01185	1421765	1139	292980106
+M	m01186	1422905	626	1328143754
+M	m01187	1423532	134	3932761356
+M	m01188	1423667	484	4147618948
+M	m01189	1424152	5	63373632
+M	m01190	1424158	931	61941242
+M	m01191	1425090	626	2060108794
+M	m01192	1425717	5	75760004
+M	m01193	1425723	1250	1920764028
+M	m01194	1426974	1900	3960578591
+M	m01195	1428875	246	2965195687
+M	m01196	1429122	911	1594100436
+M	m01197	1430034	701	3450790217
+M	m01198	1430736	2037	2001714665
+M	m01199	1432774	2028	14404697
+M	m01200	1434803	178	2694725211
+M	m01201	1434982	1755	854088678
+M	m01202	1436738	1336	632873066
+M	m01203	1438075	246	1420842634
+M	m01204	1438322	95	3229098743
+M	m01205	1438418	2016	1570089405
+M	m01206	1440435	40	386338261
+M	m01207	1440476	1379	2777013802
+M	m01208	1441856	277	141647124
+M	m01209	1442134	1443	2430199688
+M	m01210	1443578	296	1604740401
+M	m01211	1443875	248	2521847777
+M	m01212	1444124	963	1016156144
+M	m01213	1445088	590	2765606249
+M	m01214	1445679	48	2447970353
+M	m01215	1445728	100	4128842467
+M	m01216	1445829	1488	433327708
+M	m01217	1447318	1993	3580592821
+M	m01218	1449312	124	3090033484
+M	m01219	1449437	1749	3605354532
+M	m01220	1451187	1982	181247828
+M	m01221	1453170	1188	692424074
+M	m01222	1454359	392	432046016
+M	m01223	1454752	177	1785478397
+M	m01224	1454930	354	2598075443
+M	m01225	1455285	1483	1477309547
+M	m01226	1456769	1618	2151555447
+M	m01227	1458388	50	2648444998
+M	m01228	1458439	16	773326198
+M	m01229	1458456	253	2930070885
+M	m01230	1458710	52	185603015
+M	m01231	1458763	594	1736562113
+M	m01232	1459358	34	3482848056
+M	m01233	1459393	390	1336837840
+M	m01234	1459784	188	2180138259
+M	m01235	1459973	589	1456128067
+M	m01236	1460563	341	3500570842
+M	m01237	1460905	77	2511018238
+M	m01238	1460983	198	2063549518
+M	m01239	1461182	453	449748284
+M	m01240	1461636	314	311127467
+M	m01241	1461951	707	3259494792
+M	m01242	1462659	253	1396660148
+M	m01243	1462913	393	1468303162
+M	m01244	1463307	45	363400444
+M	m01245	1463353	33	3233942273
+M	m01246	1463387	8	188351141
+M	m01247	1463396	1362	849008790
+M	m01248	1464759	166	1656108877
+M	m01249	1464926	161	2243377006
+M	m01250	1465088	1171	3944455246
+M	m01251	1466260	197	184828361
+M	m01252	1466458	513	144749282
+M	m01253	1466972	866	565060070
+M	m01254	1467839	1270	2861674572
+M	m01255	1469110	32	3137080040
+M	m01256	1469143	101	1866081457
+M	m01257	1469245	1817	809443899
+M	m01258	1471063	1921	2185442963
+M	m01259	1472985	1082	2647754562
+M	m01260	1474068	573	3888303179
+M	m01261	1474642	1906	1516997571
+M	m01262	1476549	56	2905214913
+M	m01263	1476606	1612	793845577
+M	m01264	1478219	1297	3353464054
+M	m01265	1479517	304	1959816416
+M	m01266	1479822	461	1600166593
+M	m01267	1480284	891	2561748537
+M	m01268	1481176	1630	4114819666
+M	m01269	1482807	545	727294746
+M	m01270	1483353	1104	285753899
+M	m01271	1484458	240	2855621198
+M	m01272	1484699	412	652708819
+M	m01273	1485112	714	2571565243
+M	m01274	1485827	1861	617841643
+M	m01275	1487689	1344	119257478
+M	m01276	1489034	54	4204401213
+M	m01277	1489089	132	3670092863
+M	m01278	1489222	23	1607403508
+M	m01279	1489246	536	2059777883
+M	m01280	1489783	1073	1416191862
+M	m01281	1490857	61	3187347361
+M	m01282	1490919	978	3191295899
+M	m01283	1491898	47	3775400415
+M	m01284	1491946	33	3425897378
+M	m01285	1491980	82	2619284534
+M	m01286	1492063	1073	818246564
+M	m01287	1493137	654	4035171415
+M	m01288	1493792	18	803079440
+M	m01289	1493811	55	1068831679
+M	m01290	1493867	102	4192412385
+M	m01291	1493970	353	3894833926
+M	m01292	1494324	52	3826192816
+M	m01293	1494377	813	3551988345
+M	m01294	1495191	24	1562904312
+M	m01295	1495216	1711	4032832482
+M	m01296	1496928	1272	2642525032
+M	m01297	1498201	323	3891228188
+M	m01298	1498525	82	2097814389
+M	m01299	1498608	1389	1933103721
+M	m01300	1499998	109	1885938494
+M	m01301	1500108	1472	3640588893
+M	m01302	1501581	93	3638432997
+M	m01303	1501675	98	3988988761
+M	m01304	1501774	1122	1890547528
+M	m01305	1502897	306	3773459373
+M	m01306	1503204	1289	1372110555
+M	m01307	1504494	51	3617526256
+M	m01308	1504546	17	777782638
+M	m01309	1504564	14	633537794
+M	m01310	1504579	80	2762349878
+M	m01311	1504660	937	3245362400
+M	m01312	1505598	569	2648296515
+M	m01313	1506168	1624	4107416791
+M	m01314	1507793	1755	2103997807
+M	m01315	1509549	1767	1459050541
+M	m01316	1511317	702	2347427177
+M	m01317	1512020	685	2509498718
+M	m01318	1512706	173	1569471897
+M	m01319	1512880	242	2329104510
+M	m01320	1513123	339	1475899639
+M	m01321	1513463	58	1524372535
+M	m01322	1513522	873	1594238736
+M	m01323	1514396	112	2471175957
+M	m01324	1514509	27	2230913455
+M	m01325	1514537	299	3084805014
+M	m01326	1514837	1624	160378608
+M	m01327	1516462	526	565097656
+M	m01328	1516989	1112	2047903477
+M	m01329	1518102	353	1841134919
+M	m01330	1518456	686	2269048784
+M	m01331	1519143	458	1567662599
+M	m01332	1519602	565	861781286
+M	m01333	1520168	1009	556352931
+M	m01334	1521178	52	3578007911
+M	m01335	1521231	1444	3279415594
+M	m01336	1522676	598	4287354432
+M	m01337	1523275	814	3560710411
+M	m01338	1524090	42	814681531
+M	m01339	1524133	1691	2096905786
+M	m01340	1525825	589	3416445087
+M	m01341	1526415	446	568369649
+M	m01342	1526862	25	1916668134
+M	m01343	1526888	64	3971618292
+M	m01344	1526953	498	3909265883
+M	m01345	1527452	833	1352477211
+M	m01346	1528286	580	853918771
+M	m01347	1528867	993	199249759
+M	m01348	1529861	722	228655204
+M	m01349	1530584	235	3990311917
+M	m01350	1530820	172	2263629504
+M	m01351	1530993	111	108275915
+M	m01352	1531105	181	1790327634
+M	m01353	1531287	1205	2597954817
+M	m01354	1532493	115	4100728787
+M	m01355	1532609	172	2760523054
+M	m01356	1532782	81	2471304212
+M	m01357	1532864	331	828339949
+M	m01358	1533196	1652	595212769
+M	m01359	1534849	1623	971187546
+M	m01360	1536473	693	3519608827
+M	m01361	1537167	704	3760977395
+M	m01362	1537872	1638	2844779517
+M	m01363	1539511	1484	989981189
+M	m01364	1540996	166	4022024586
+M	m01365	1541163	22	1209730635
+M	m01366	1541186	15	578290756
+M	m01367	1541202	524	2527897230
+M	m01368	1541727	149	21443534
+M	m01369	1541877	1595	1988764333
+M	m01370	1543473	668	3392330635
+M	m01371	1544142	810	648090930
+M	m01372	1544953	708	717877198
+M	m01373	1545662	765	869270913
+M	m01374	1546428	310	3709823369
+M	m01375	1546739	1000	3070383944
+M	m01376	1547740	99	3708822203
+M	m01377	1547840	1379	67168380
+M	m01378	1549220	1494	3052265048
+M	m01379	1550715	247	960058542
+M	m01380	1550963	883	2264804732
+M	m01381	1551847	1011	1648581937
+M	m01382	1552859	143	2542350415
+M	m01383	1553003	64	2598769809
+M	m01384	1553068	750	2261909186
+M	m01385	1553819	537	831503072
+M	m01386	1554357	1306	114866493
+M	m01387	1555664	26	1936066538
+M	m01388	1555691	1218	264478945
+M	m01389	1556910	106	924329644
+M	m01390	1557017	51	3243118857
+M	m01391	1557069	756	3161390812
+M	m01392	1557826	366	2482928944
+M	m01393	1558193	70	1420695468
+M	m01394	1558264	16	804521262
+M	m01395	1558281	1237	2484561544
+M	m01396	1559519	1544	683936440
+M	m01397	1561064	1114	1717919593
+M	m01398	1562179	267	4276442781
+M	m01399	1562447	189	1181564622
+M	m01400	1562637	577	1968097496
+M	m01401	1563215	317	2377083982
+M	m01402	1563533	639	3149324838
+M	m01403	1564173	782	2377846311
+M	m01404	1564956	200	3519298321
+M	m01405	1565157	1232	2572246386
+M	m01406	1566390	794	1084621498
+M	m01407	1567185	188	762463521
+M	m01408	1567374	48	2017922725
+M	m01409	1567423	188	972112776
+M	m01410	1567612	64	3113751996
+M	m01411	1567677	42	929435134
+M	m01412	1567720	981	3566226114
+M	m01413	1568702	973	2760787155
+M	m01414	1569676	131	532032733
+M	m01415	1569808	206	3213574925
+M	m01416	1570015	270	2048480133
+M	m01417	1570286	954	3694215409
+M	m01418	1571241	39	71961779
+M	m01419	1571281	404	3365047087
+M	m01420	1571686	143	940782108
+M	m01421	1571830	548	769833617
+M	m01422	1572379	1493	1292765895
+M	m01423	1573873	227	1197821036
+M	m01424	1574101	245	4186854223
+M	m01425	1574347	764	1605567649
+M	m01426	1575112	566	3862344801
+M	m01427	1575679	825	1675169508
+M	m01428	1576505	1030	2265668987
+M	m01429	1577536	334	439052939
+M	m01430	1577871	1468	3900247585
+M	m01431	1579340	216	4110830274
+M	m01432	1579557	825	1024337902
+M	m01433	1580383	91	301474110
+M	m01434	1580475	1348	1588909481
+M	m01435	1581824	16	771425646
+M	m01436	1581841	12	448005140
+M	m01437	1581854	290	1912824775
+M	m01438	1582145	92	3091996502
+M	m01439	1582238	34	3271625565
+M	m01440	1582273	215	3464710367
+M	m01441	1582489	281	3816448200
+M	m01442	1582771	1091	271736582
+M	m01443	1583863	607	1796980464
+M	m01444	1584471	491	1915857888
+M	m01445	1584963	19	1023280585
+M	m01446	1584983	35	1994065594
+M	m01447	1585019	45	3517778541
+M	m01448	1585065	718	1142419164
+M	m01449	1585784	370	2791473256
+M	m01450	1586155	112	3401392684
+M	m01451	1586268	1204	2083032782
+M	m01452	1587473	1271	243974742
+M	m01453	1588745	393	3107161644
+M	m01454	1589139	269	419255870
+M	m01455	1589409	274	2978766163
+M	m01456	1589684	52	3331264818
+M	m01457	1589737	1426	660594554
+M	m01458	1591164	1315	519950923
+M	m01459	1592480	1441	43964351
+M	m01460	1593922	311	2119789348
+M	m01461	1594234	736	310764989
+M	m01462	1594971	95	1335435579
+M	m01463	1595067	1184	144546757
+M	m01464	1596252	575	2226768294
+M	m01465	1596828	695	1238431677
+M	m01466	1597524	1286	2684209371
+M	m01467	1598811	380	465405361
+M	m01468	1599192	167	1303391750
+M	m01469	1599360	159	2779724528
+M	m01470	1599520	78	2271222881
+M	m01471	1599599	117	3333956948
+M	m01472	1599717	114	2090673783
+M	m01473	1599832	303	416901468
+M	m01474	1600136	117	2247566978
+M	m01475	1600254	102	8790394
+M	m01476	1600357	381	1092648383
+M	m01477	1600739	648	2349389579
+M	m01478	1601388	113	4136576946
+M	m01479	1601502	1128	2446361012
+M	m01480	1602631	151	3083940878
+M	m01481	1602783	1093	2809497373
+M	m01482	1603877	868	3466665115
+M	m01483	1604746	221	1103121831
+M	m01484	1604968	17	877659624
+M	m01485	1604986	1221	2566690516
+M	m01486	1606208	1413	307996312
+M	m01487	1607622	108	895624767
+M	m01488	1607731	1139	2951709807
+M	m01489	1608871	14	593364183
+M	m01490	1608886	1032	510552156
+M	m01491	1609919	43	1011813855
+M	m01492	1609963	903	1843476896
+M	m01493	1610867	35	3686141031
+M	m01494	1610903	149	1365914819
+M	m01495	1611053	13	368640827
+M	m01496	1611067	969	1325027378
+M	m01497	1612037	1402	2607909530
+M	m01498	1613440	1012	3552195736
+M	m01499	1614453	231	2966571519
+M	m01500	1614685	963	1447778032
+M	m01501	1615649	67	392042222
+M	m01502	1615717	17	738067632
+M	m01503	1615735	1109	2697748337
+M	m01504	1616845	992	656562892
+M	m01505	1617838	48	2873495965
+M	m01506	1617887	15	642843840
+M	m01507	1617903	1062	3621999314
+M	m01508	1618966	1187	1864277547
+M	m01509	1620154	114	2884379859
+M	m01510	1620269	1097	3554768472
+M	m01511	1621367	266	2237095589
+M	m01512	1621634	266	1021073444
+M	m01513	1621901	487	932096146
+M	m01514	1622389	193	399786709
+M	m01515	1622583	147	1866543113
+M	m01516	1622731	211	1629111725
+M	m01517	1622943	27	2438924775
+M	m01518	1622971	43	1686900593
+M	m01519	1623015	136	21244990
+M	m01520	1623152	9	214172337
+M	m01521	1623162	160	3292018643
+M	m01522	1623323	343	2917758772
+M	m01523	1623667	291	2448908384
+M	m01524	1623959	32	2993687293
+M	m01525	1623992	153	2940286079
+M	m01526	1624146	213	3514649977
+M	m01527	1624360	83	118496775
+M	m01528	1624444	127	1247489280
+M	m01529	1624572	1086	2907863404
+M	m01530	1625659	463	1697684493
+M	m01531	1626123	55	203035224
+M	m01532	1626179	93	2968854431
+M	m01533	1626273	40	602934616
+M	m01534	1626314	1317	3232611878
+M	m01535	1627632	1096	1315732023
+M	m01536	1628729	29	2375485730
+M	m01537	1628759	989	910447425
+M	m01538	1629749	481	1503895584
+M	m01539	1630231	324	1794141988
+M	m01540	1630556	13	570426547
+M	m01541	1630570	33	3305179818
+M	m01542	1630604	52	3961262640
+M	m01543	1630657	1105	1814660716
+M	m01544	1631763	827	622399783
+M	m01545	1632591	131	2886610354
+M	m01546	1632723	876	614612106
+M	m01547	1633600	36	3913419778
+M	m01548	1633637	471	2227871577
+M	m01549	1634109	127	3000116894
+M	m01550	1634237	428	4156132333
+M	m01551	1634666	441	924030581
+M	m01552	1635108	572	3732586756
+M	m01553	1635681	127	1968514975
+M	m01554	1635809	1013	2030266948
+M	m01555	1636823	203	3671278616
+M	m01556	1637027	840	3660383107
+M	m01557	1637868	497	1129751863
+M	m01558	1638366	635	81843665
+M	m01559	1639002	125	605759193
+M	m01560	1639128	1009	3388824434
+M	m01561	1640138	51	3436974485
+M	m01562	1640190	1047	3099488228
+M	m01563	1641238	93	268050673
+M	m01564	1641332	11	263455466
+M	m01565	1641344	912	2501192840
+M	m01566	1642257	1107	2262790796
+M	m01567	1643365	588	2811153228
+M	m01568	1643954	531	3549344057
+M	m01569	1644486	98	2605785570
+M	m01570	1644585	615	2364068806
+M	m01571	1645201	47	2502889638
+M	m01572	1645249	162	2502047792
+M	m01573	1645412	1208	4261908712
+M	m01574	1646621	1204	271426024
+M	m01575	1647826	376	317556109
+M	m01576	1648203	17	798098621
+M	m01577	1648221	538	2036577077
+M	m01578	1648760	292	3912786016
+M	m01579	1649053	345	2459464305
+M	m01580	1649399	267	1522556356
+M	m01581	1649667	1085	1441429871
+M	m01582	1650753	1205	2355597747
+M	m01583	1651959	535	3759189221
+M	m01584	1652495	419	2657390820
+M	m01585	1652915	1235	735870851
+M	m01586	1654151	1075	1036614162
+M	m01587	1655227	109	4218103215
+M	m01588	1655337	861	1593977578
+M	m01589	1656199	624	3851669792
+M	m01590	1656824	455	3826815581
+M	m01591	1657280	98	3051299291
+M	m01592	1657379	976	1320044782
+M	m01593	1658356	1037	2869191068
+M	m01594	1659394	1074	528313880
+M	m01595	1660469	109	4035715868
+M	m01596	1660579	47	2143489990
+M	m01597	1660627	819	3688829250
+M	m01598	1661447	145	4273352748
+M	m01599	1661593	719	1406727872
+M	m01600	1662313	10	221381244
+M	m01601	1662324	49	2818904263
+M	m01602	1662374	13	566297798
+M	m01603	1662388	20	1204094632
+M	m01604	1662409	1034	3673384052
+M	m01605	1663444	994	4166936348
+M	m01606	1664439	17	856884548
+M	m01607	1664457	99	3714458275
+M	m01608	1664557	952	2234662191
+M	m01609	1665510	434	2796131210
+M	m01610	1665945	599	2625423576
+M	m01611	1666545	139	692137857
+M	m01612	1666685	14	497746897
+M	m01613	1666700	16	763430166
+M	m01614	1666717	633	1371464727
+M	m01615	1667351	34	2883521067
+M	m01616	1667386	578	1784661635
+M	m01617	1667965	176	915946933
+M	m01618	1668142	72	369170100
+M	m01619	1668215	750	4263638679
+M	m01620	1668966	95	725295219
+M	m01621	1669062	944	1989818940
+M	m01622	1670007	94	919871759
+M	m01623	1670102	948	21776938
+M	m01624	1671051	1141	233341443
+M	m01625	1672193	480	3962547661
+M	m01626	1672674	407	1719504328
+M	m01627	1673082	555	1660466624
+M	m01628	1673638	477	2494733609
+M	m01629	1674116	955	3880076557
+M	m01630	1675072	74	1046025843
+M	m01631	1675147	16	457704247
+M	m01632	1675164	98	630269099
+M	m01633	1675263	302	2589811243
+M	m01634	1675566	237	2232504202
+M	m01635	1675804	165	1952724408
+M	m01636	1675970	225	3197062213
+M	m01637	1676196	1007	423648971
+M	m01638	1677204	235	2654359615
+M	m01639	1677440	764	3842443203
+M	m01640	1678205	768	2950629736
+M	m01641	1678974	1103	4091904796
+M	m01642	1680078	123	2666605363
+M	m01643	1680202	85	724701855
+M	m01644	1680288	684	2127817566
+M	m01645	1680973	1086	2947254619
+M	m01646	1682060	77	4208925306
+M	m01647	1682138	181	1583558906
+M	m01648	1682320	16	736036161
+M	m01649	1682337	74	390077129
+M	m01650	1682412	25	1056769220
+M	m01651	1682438	83	2738887715
+M	m01652	1682522	717	2293366867
+M	m01653	1683240	246	1357467474
+M	m01654	1683487	945	1202607197
+M	m01655	1684433	1071	951214904
+M	m01656	1685505	929	2558931663
+M	m01657	1686435	41	901844678
+M	m01658	1686477	3	14221420
+M	m01659	1686481	349	1771535094
+M	m01660	1686831	311	2449368925
+M	m01661	1687143	105	3082953882
+M	m01662	1687249	851	4011859217
+M	m01663	1688101	1065	4201410120
+M	m01664	1689167	884	1048850071
+M	m01665	1690052	183	1643855736
+M	m01666	1690236	19	1132332636
+M	m01667	1690256	614	518508471
+M	m01668	1690871	209	4062529512
+M	m01669	1691081	275	620583944
+M	m01670	1691357	560	2114177181
+M	m01671	1691918	271	3341309099
+M	m01672	1692190	37	3542747863
+M	m01673	1692228	25	1937180790
+M	m01674	1692254	60	931664676
+M	m01675	1692315	786	616956789
+M	m01676	1693102	123	2783980542
+M	m01677	1693226	496	3593445588
+M	m01678	1693723	218	2595507228
+M	m01679	1693942	30	1541080744
+M	m01680	1693973	82	2356812788
+M	m01681	1694056	110	867444009
+M	m01682	1694167	1040	3036502577
+M	m01683	1695208	61	2857768488
+M	m01684	1695270	587	1159644059
+M	m01685	1695858	10	260309694
+M	m01686	1695869	190	325664171
+M	m01687	1696060	742	2350645976
+M	m01688	1696803	453	3586626965
+M	m01689	1697257	198	1581336047
+M	m01690	1697456	14	559744056
+M	m01691	1697471	939	317275894
+M	m01692	1698411	1040	2316327459
+M	m01693	1699452	1029	3632618237
+M	m01694	1700482	617	2513426523
+M	m01695	1701100	309	2844356624
+M	m01696	1701410	1042	204949930
+M	m01697	1702453	870	1040843021
+M	m01698	1703324	49	1992756994
+M	m01699	1703374	186	1425424104
+M	m01700	1703561	452	4282884596
+M	m01701	1704014	90	2737970897
+M	m01702	1704105	823	2921009335
+M	m01703	1704929	105	3058443449
+M	m01704	1705035	815	4093513624
+M	m01705	1705851	18	978716168
+M	m01706	1705870	889	3551927236
+M	m01707	1706760	90	428547696
+M	m01708	1706851	22	1344276208
+M	m01709	1706874	82	4259323385
+M	m01710	1706957	356	1994422495
+M	m01711	1707314	428	4147610694
+M	m01712	1707743	895	66395327
+M	m01713	1708639	1002	1891652122
+M	m01714	1709642	89	97066555
+M	m01715	1709732	21	1181877884
+M	m01716	1709754	78	1189420067
+M	m01717	1709833	27	2232420633
+M	m01718	1709861	86	2060394385
+M	m01719	1709948	88	4112653840
+M	m01720	1710037	19	923272629
+M	m01721	1710057	998	887641387
+M	m01722	1711056	996	138697528
+M	m01723	1712053	351	186088144
+M	m01724	1712405	44	4007987697
+M	m01725	1712450	347	3979310101
+M	m01726	1712798	342	445476094
+M	m01727	1713141	27	1995311146
+M	m01728	1713169	373	3666902161
+M	m01729	1713543	471	3502677143
+M	m01730	1714015	44	1565593454
+M	m01731	1714060	735	2500854055
+M	m01732	1714796	490	655534358
+M	m01733	1715287	395	3334768045
+M	m01734	1715683	863	2966297695
+M	m01735	1716547	984	1696290937
+M	m01736	1717532	349	705264482
+M	m01737	1717882	361	978748796
+M	m01738	1718244	794	2011829197
+M	m01739	1719039	348	4044320634
+M	m01740	1719388	154	4053808486
+M	m01741	1719543	457	4079917654
+M	m01742	1720001	409	88770321
+M	m01743	1720411	101	4214366720
+M	m01744	1720513	760	1882064448
+M	m01745	1721274	183	1023687940
+M	m01746	1721458	677	225045544
+M	m01747	1722136	585	3983918990
+M	m01748	1722722	255	2634044444
+M	m01749	1722978	81	2435783748
+M	m01750	1723060	771	2551253835
+M	m01751	1723832	125	3533777866
+M	m01752	1723958	589	1050134075
+M	m01753	1724548	632	2611728963
+M	m01754	1725181	205	595149431
+M	m01755	1725387	91	3519684728
+M	m01756	1725479	761	2751592890
+M	m01757	1726241	222	2565227364
+M	m01758	1726464	32	2942896902
+M	m01759	1726497	7	162726496
+M	m01760	1726505	78	1231494053
+M	m01761	1726584	83	35790287
+M	m01762	1726668	113	2587436028
+M	m01763	1726782	255	999445723
+M	m01764	1727038	354	4106057551
+M	m01765	1727393	52	3350073403
+M	m01766	1727446	362	36010418
+M	m01767	1727809	205	3219605811
+M	m01768	1728015	16	769393934
+M	m01769	1728032	461	133798766
+M	m01770	1728494	42	1398214438
+M	m01771	1728537	74	2065831946
+M	m01772	1728612	126	41495387
+M	m01773	1728739	704	2820141884
+M	m01774	1729444	49	2971078950
+M	m01775	1729494	754	4209901370
+M	m01776	1730249	926	1456095670
+M	m01777	1731176	164	1215837178
+M	m01778	1731341	655	2479611553
+M	m01779	1731997	507	2831003323
+M	m01780	1732505	3	22479019
+M	m01781	1732509	193	930562644
+M	m01782	1732703	916	3708762702
+M	m01783	1733620	107	4092011661
+M	m01784	1733728	654	3663650941
+M	m01785	1734383	716	663483033
+M	m01786	1735100	57	1270223811
+M	m01787	1735158	739	2313026923
+M	m01788	1735898	904	336081068
+M	m01789	1736803	23	1535903629
+M	m01790	1736827	84	4017233294
+M	m01791	1736912	474	452632370
+M	m01792	1737387	924	4132583952
+M	m01793	1738312	158	1029715561
+M	m01794	1738471	642	3852390637
+M	m01795	1739114	903	1500004028
+M	m01796	1740018	130	3726257797
+M	m01797	1740149	328	1223454728
+M	m01798	1740478	227	1602834508
+M	m01799	1740706	906	790113785
+M	m01800	1741613	896	3641587382
+M	m01801	1742510	656	1806362921
+M	m01802	1743167	598	216188853
+M	m01803	1743766	16	585106499
+M	m01804	1743783	882	3560975655
+M	m01805	1744666	146	2736468765
+M	m01806	1744813	640	75617054
+M	m01807	1745454	919	3089509812
+M	m01808	1746374	875	3343132810
+M	m01809	1747250	874	2697471124
+M	m01810	1748125	21	1340082007
+M	m01811	1748147	749	1622080719
+M	m01812	1748897	334	3154997404
+M	m01813	1749232	426	2682424339
+M	m01814	1749659	152	2010459530
+M	m01815	1749812	30	2867792500
+M	m01816	1749843	12	467600456
+M	m01817	1749856	600	3802252766
+M	m01818	1750457	631	603641161
+M	m01819	1751089	103	2091721647
+M	m01820	1751193	855	1835081240
+M	m01821	1752049	118	946742696
+M	m01822	1752168	601	1590019732
+M	m01823	1752770	853	2137007437
+M	m01824	1753624	832	4250214876
+M	m01825	1754457	79	1634081785
+M	m01826	1754537	664	3294947016
+M	m01827	1755202	831	2824475949
+M	m01828	1756034	658	3461667574
+M	m01829	1756693	34	3455192067
+M	m01830	1756728	611	2143082501
+M	m01831	1757340	95	1011294302
+M	m01832	1757436	632	1671550762
+M	m01833	1758069	465	1757715267
+M	m01834	1758535	243	2855358814
+M	m01835	1758779	618	3446724676
+M	m01836	1759398	657	1650512102
+M	m01837	1760056	185	4115873568
+M	m01838	1760242	220	3401140575
+M	m01839	1760463	81	2212371464
+M	m01840	1760545	99	3966247024
+M	m01841	1760645	416	1812827925
+M	m01842	1761062	805	440732705
+M	m01843	1761868	705	4107989237
+M	m01844	1762574	11	366347219
+M	m01845	1762586	43	1239879203
+M	m01846	1762630	158	1470445029
+M	m01847	1762789	44	1835536363
+M	m01848	1762834	107	1217603094
+M	m01849	1762942	74	2474383505
+M	m01850	1763017	631	4130263787
+M	m01851	1763649	805	3823835612
+M	m01852	1764455	464	3739066522
+M	m01853	1764920	384	1313111466
+M	m01854	1765305	98	1975093
+M	m01855	1765404	317	1328639362
+M	m01856	1765722	102	1214325808
+M	m01857	1765825	172	3224582558
+M	m01858	1765998	525	2912067391
+M	m01859	1766524	795	4167173951
+M	m01860	1767320	499	1362994084
+M	m01861	1767820	61	2719552856
+M	m01862	1767882	778	2126777348
+M	m01863	1768661	637	791402744
+M	m01864	1769299	50	3271102869
+M	m01865	1769350	188	2505457370
+M	m01866	1769539	78	4170652009
+M	m01867	1769618	32	2959411743
+M	m01868	1769651	90	2597199459
+M	m01869	1769742	587	1366146907
+M	m01870	1770330	784	999624253
+M	m01871	1771115	773	535169811
+M	m01872	1771889	21	1156122056
+M	m01873	1771911	102	2448303309
+M	m01874	1772014	766	2786656331
+M	m01875	1772781	757	973339692
+M	m01876	1773539	79	1517362136
+M	m01877	1773619	577	1945223075
+M	m01878	1774197	32	3261664141
+M	m01879	1774230	469	3120799926
+M	m01880	1774700	87	2012550013
+M	m01881	1774788	187	475087325
+M	m01882	1774976	734	2877092942
+M	m01883	1775711	72	2637043987
+M	m01884	1775784	322	3322571835
+M	m01885	1776107	138	634465327
+M	m01886	1776246	727	468711202
+M	m01887	1776974	17	826606908
+M	m01888	1776992	509	2968366330
+M	m01889	1777502	714	2165176565
+M	m01890	1778217	13	370017087
+M	m01891	1778231	22	1468270480
+M	m01892	1778254	208	3070768047
+M	m01893	1778463	253	3818739640
+M	m01894	1778717	20	1212810981
+M	m01895	1778738	591	3176643169
+M	m01896	1779330	577	2992031311
+M	m01897	1779908	92	3671138059
+M	m01898	1780001	107	185409854
+M	m01899	1780109	288	1095656580
+M	m01900	1780398	563	2206777093
+M	m01901	1780962	515	996715662
+M	m01902	1781478	421	32214943
+M	m01903	1781900	181	2974891050
+M	m01904	1782082	743	3158494301
+M	m01905	1782826	718	1868357460
+M	m01906	1783545	27	1908344760
+M	m01907	1783573	686	3547128070
+M	m01908	1784260	234	1804226697
+M	m01909	1784495	350	836664548
+M	m01910	1784846	83	3529907445
+M	m01911	1784930	504	2447288194
+M	m01912	1785435	680	1229186835
+M	m01913	1786116	310	288254353
+M	m01914	1786427	64	3693483557
+M	m01915	1786492	10	281674486
+M	m01916	1786503	379	2479718546
+M	m01917	1786883	504	2161485695
+M	m01918	1787388	668	560524717
+M	m01919	1788057	84	4026801458
+M	m01920	1788142	482	614900726
+M	m01921	1788625	339	424045652
+M	m01922	1788965	53	4048753058
+M	m01923	1789019	54	573838303
+M	m01924	1789074	106	3520995815
+M	m01925	1789181	266	1030838224
+M	m01926	1789448	648	4261468309
+M	m01927	1790097	644	2130696702
+M	m01928	1790742	29	2553350724
+M	m01929	1790772	506	2145692681
+M	m01930	1791279	164	838022696
+M	m01931	1791444	35	3541699445
+M	m01932	1791480	34	3577809703
+M	m01933	1791515	34	2180974667
+M	m01934	1791550	218	2285521776
+M	m01935	1791769	182	3414441811
+M	m01936	1791952	98	2889163138
+M	m01937	1792051	445	1999017059
+M	m01938	1792497	478	3085214678
+M	m01939	1792976	635	4267235235
+M	m01940	1793612	154	2375366284
+M	m01941	1793767	368	1802797410
+M	m01942	1794136	43	1369313157
+M	m01943	1794180	224	2372619620
+M	m01944	1794405	219	4037102377
+M	m01945	1794625	107	1335042354
+M	m01946	1794733	96	979509317
+M	m01947	1794830	92	3457031995
+M	m01948	1794923	416	2053997992
+M	m01949	1795340	102	869606054
+M	m01950	1795443	415	1099991297
+M	m01951	1795859	610	80726299
+M	m01952	1796470	508	1106421717
+M	m01953	1796979	604	1667223557
+M	m01954	1797584	121	4275906398
+M	m01955	1797706	189	2851880410
+M	m01956	1797896	141	1323576960
+M	m01957	1798038	359	3950934378
+M	m01958	1798398	200	3784328145
+M	m01959	1798599	208	701514871
+M	m01960	1798808	300	2797890017
+M	m01961	1799109	182	1275412205
+M	m01962	1799292	436	3734803144
+M	m01963	1799729	91	4000653612
+M	m01964	1799821	295	2157799042
+M	m01965	1800117	34	1889535589
+M	m01966	1800152	482	3001066911
+M	m01967	1800635	584	2467087103
+M	m01968	1801220	420	680430485
+M	m01969	1801641	587	2133898842
+M	m01970	1802229	298	1292985282
+M	m01971	1802528	173	145569863
+M	m01972	1802702	23	1249511089
+M	m01973	1802726	84	3916045545
+M	m01974	1802811	374	1001880156
+M	m01975	1803186	45	722668920
+M	m01976	1803232	263	4070856330
+M	m01977	1803496	564	2774515761
+M	m01978	1804061	71	2203326651
+M	m01979	1804133	381	1614447458
+M	m01980	1804515	80	1993939831
+M	m01981	1804596	203	1663319783
+M	m01982	1804800	78	136976891
+M	m01983	1804879	373	2740550362
+M	m01984	1805253	113	2301371516
+M	m01985	1805367	335	129265232
+M	m01986	1805703	372	64256725
+M	m01987	1806076	562	642762069
+M	m01988	1806639	533	14922706
+M	m01989	1807173	529	1927917336
+M	m01990	1807703	521	1825944164
+M	m01991	1808225	161	2980132456
+M	m01992	1808387	82	2933529619
+M	m01993	1808470	338	1462333598
+M	m01994	1808809	332	4232932810
+M	m01995	1809142	161	2955818596
+M	m01996	1809304	10	158073268
+M	m01997	1809315	10	160170424
+M	m01998	1809326	60	718017118
+M	m01999	1809387	207	2396931827
+M	m02000	1809595	84	4042661257
+M	m02001	1809680	322	2807327168
+M	m02002	1810003	500	1566680816
+M	m02003	1810504	498	374058812
+M	m02004	1811003	102	506733045
+M	m02005	1811106	305	3653788495
+M	m02006	1811412	324	3793054418
+M	m02007	1811737	513	93168901
+M	m02008	1812251	376	2779282096
+M	m02009	1812628	480	1053664874
+M	m02010	1813109	49	2910785681
+M	m02011	1813159	4	27590821
+M	m02012	1813164	339	2690674277
+M	m02013	1813504	234	3450884318
+M	m02014	1813739	467	4193360459
+M	m02015	1814207	36	3921939524
+M	m02016	1814244	309	1375628091
+M	m02017	1814554	223	1978617453
+M	m02018	1814778	123	3426297933
+M	m02019	1814902	461	1747361371
+M	m02020	1815364	455	3652362214
+M	m02021	1815820	448	3479672982
+M	m02022	1816269	43	1153830467
+M	m02023	1816313	304	1259038815
+M	m02024	1816618	445	1620743925
+M	m02025	1817064	90	2632785524
+M	m02026	1817155	83	1377769990
+M	m02027	1817239	49	2639990780
+M	m02028	1817289	92	3802931034
+M	m02029	1817382	247	23023212
+M	m02030	1817630	57	1376392271
+M	m02031	1817688	278	472931381
+M	m02032	1817967	31	2921532118
+M	m02033	1817999	300	1799644118
+M	m02034	1818300	431	598575018
+M	m02035	1818732	80	1898060597
+M	m02036	1818813	409	4206791878
+M	m02037	1819223	408	2020969042
+M	m02038	1819632	235	1494568972
+M	m02039	1819868	65	4057142867
+M	m02040	1819934	227	891310036
+M	m02041	1820162	399	2267645946
+M	m02042	1820562	220	3453045628
+M	m02043	1820783	227	4288760714
+M	m02044	1821011	91	1368923586
+M	m02045	1821103	204	180307021
+M	m02046	1821308	102	3695649397
+M	m02047	1821411	102	3708494455
+M	m02048	1821514	102	3682673267
+M	m02049	1821617	102	3721601657
+M	m02050	1821720	101	3395363400
+M	m02051	1821822	32	3049130786
+M	m02052	1821855	9	214499935
+M	m02053	1821865	157	4274270886
+M	m02054	1822023	3	15663223
+M	m02055	1822027	98	2415010226
+M	m02056	1822126	208	2710063201
+M	m02057	1822335	388	1705803948
+M	m02058	1822724	74	3630242315
+M	m02059	1822799	203	886587872
+M	m02060	1823003	197	3059565909
+M	m02061	1823201	197	2265466089
+M	m02062	1823399	371	3268771823
+M	m02063	1823771	247	3010942740
+M	m02064	1824019	329	332820970
+M	m02065	1824349	21	1147733682
+M	m02066	1824371	15	490406843
+M	m02067	1824387	19	997197379
+M	m02068	1824407	13	383517516
+M	m02069	1824421	324	2432987121
+M	m02070	1824746	146	3201249255
+M	m02071	1824893	130	3905104503
+M	m02072	1825024	124	4127795342
+M	m02073	1825149	149	4224463653
+M	m02074	1825299	271	634673488
+M	m02075	1825571	263	2974374728
+M	m02076	1825835	135	915679979
+M	m02077	1825971	37	3611101824
+M	m02078	1826009	251	73553484
+M	m02079	1826261	128	3207801662
+M	m02080	1826390	127	2761304848
+M	m02081	1826518	28	2139818135
+M	m02082	1826547	127	2761239312
+M	m02083	1826675	125	1952918189
+M	m02084	1826801	25	1835993097
+M	m02085	1826827	124	1449536117
+M	m02086	1826952	23	1567360934
+M	m02087	1826976	229	4107817252
+M	m02088	1827206	122	538716690
+M	m02089	1827329	97	369762172
+M	m02090	1827427	87	239869382
+M	m02091	1827515	175	3544136718
+m00001%3A0%3A43132
 m00275%3A0%3A947%7Cm00053%3A768%3A120%7Cm00276%3A0%3A36%7Cm00053%3A1376%3A98%7Cm00277%3A0%3A599%7Cm00053%3A1728%3A263%7Cm00278%3A0%3A288%7Cm00068%3A2528%3A113%7Cm00279%3A0%3A96%7Cm00068%3A2864%3A109%7Cm00280%3A0%3A145%7Cm00053%3A2704%3A98%7Cm00281%3A0%3A3014%7Cm00069%3A592%3A96%7Cm00282%3A0%3A1582
 m00451%3A0%3A78%7Cm00220%3A80%3A112%7Cm00452%3A0%3A5092
-m01317%3A0%3A1744
-m00143%3A0%3A112%7Cm01069%3A0%3A1997%7Cm00738%3A2864%3A108%7Cm01070%3A0%3A280
-m01200%3A0%3A2021
+m01315%3A0%3A1744
+m00143%3A0%3A112%7Cm01067%3A0%3A1997%7Cm00738%3A2864%3A108%7Cm01068%3A0%3A280
+m01198%3A0%3A2021
 m00062%3A0%3A12412
 m00335%3A0%3A6558
 m00739%3A0%3A162%7Cm00646%3A128%3A145%7Cm00740%3A0%3A3283
-m01176%3A0%3A381%7Cm01104%3A240%3A106%7Cm01177%3A0%3A163%7Cm00952%3A352%3A100%7Cm01178%3A0%3A1390
+m01174%3A0%3A381%7Cm01102%3A240%3A106%7Cm01175%3A0%3A163%7Cm00952%3A352%3A100%7Cm01176%3A0%3A1390
 m00780%3A0%3A205%7Cm00423%3A16%3A96%7Cm00781%3A0%3A3048
 m00780%3A0%3A205%7Cm00423%3A16%3A96%7Cm00785%3A0%3A206%7Cm00781%3A160%3A191%7Cm00786%3A0%3A133%7Cm00781%3A688%3A111%7Cm00787%3A0%3A118%7Cm00781%3A800%3A2246
 m00729%3A0%3A1132%7Cm00054%3A5040%3A162%7Cm00730%3A0%3A669%7Cm00108%3A240%3A96%7Cm00731%3A0%3A1572
 m00897%3A0%3A163%7Cm00808%3A48%3A99%7Cm00898%3A0%3A2178%7Cm00808%3A2176%3A146%7Cm00899%3A0%3A440
 m00738%3A0%3A3595
-m01263%3A0%3A1882
-m01424%3A0%3A1478
+m01261%3A0%3A1882
+m01422%3A0%3A1478
 m00979%3A0%3A170%7Cm00782%3A176%3A101%7Cm00980%3A0%3A1081%7Cm00205%3A112%3A100%7Cm00981%3A0%3A1282
 m00993%3A0%3A1493%7Cm00335%3A2928%3A105%7Cm00994%3A0%3A86%7Cm00513%3A336%3A121%7Cm00995%3A0%3A913
 m00088%3A0%3A1103%7Cm00054%3A2960%3A176%7Cm00089%3A0%3A67%7Cm00066%3A2736%3A113%7Cm00090%3A0%3A3660%7Cm00054%3A4640%3A110%7Cm00091%3A0%3A5261%7Cm00054%3A12976%3A113%7Cm00092%3A0%3A101
 m00952%3A0%3A2773
 m00352%3A0%3A108%7Cm00468%3A0%3A1086%7Cm00062%3A2480%3A96%7Cm00469%3A0%3A3827
-m01168%3A0%3A2186
+m01166%3A0%3A2186
 m00375%3A0%3A1466%7Cm00352%3A5664%3A102%7Cm00376%3A0%3A4451
 m00055%3A0%3A104%7Cm00382%3A0%3A920%7Cm00237%3A176%3A121%7Cm00383%3A0%3A30%7Cm00237%3A336%3A206%7Cm00384%3A0%3A3083%7Cm00238%3A1648%3A201%7Cm00385%3A0%3A948%7Cm00238%3A3680%3A96%7Cm00386%3A0%3A180
 m00055%3A0%3A104%7Cm00643%3A0%3A1693%7Cm00242%3A1920%3A141%7Cm00644%3A0%3A1840%7Cm00615%3A3792%3A160
-m01425%3A0%3A221%7Cm01404%3A112%3A138%7Cm01426%3A0%3A240%7Cm00271%3A976%3A113%7Cm01427%3A0%3A751
+m01423%3A0%3A221%7Cm01402%3A112%3A138%7Cm01424%3A0%3A240%7Cm00271%3A976%3A113%7Cm01425%3A0%3A751
 m00054%3A0%3A13158
-m01859%3A0%3A164%7Cm00001%3A14576%3A127%7Cm01860%3A0%3A491
+m01857%3A0%3A164%7Cm00002%3A14576%3A127%7Cm01858%3A0%3A491
 m00324%3A0%3A7047
-m00352%3A0%3A118%7Cm01208%3A0%3A38%7Cm00902%3A32%3A99%7Cm01209%3A0%3A1366%7Cm00392%3A2256%3A107%7Cm01210%3A0%3A271
+m00352%3A0%3A118%7Cm01206%3A0%3A38%7Cm00902%3A32%3A99%7Cm01207%3A0%3A1366%7Cm00392%3A2256%3A107%7Cm01208%3A0%3A271
 m00352%3A0%3A118%7Cm00808%3A0%3A3064
-m01378%3A0%3A96%7Cm00656%3A112%3A97%7Cm01379%3A0%3A1370
+m01376%3A0%3A96%7Cm00656%3A112%3A97%7Cm01377%3A0%3A1370
 m00996%3A0%3A2717
-m01361%3A0%3A113%7Cm01712%3A0%3A354%7Cm00205%3A112%3A108%7Cm01713%3A0%3A424
+m01359%3A0%3A113%7Cm01710%3A0%3A354%7Cm00205%3A112%3A108%7Cm01711%3A0%3A424
 m00489%3A0%3A94%7Cm00084%3A96%3A173%7Cm00490%3A0%3A27%7Cm00084%3A672%3A104%7Cm00491%3A0%3A3007%7Cm00084%3A3616%3A168%7Cm00492%3A0%3A1340
 m00654%3A0%3A808%7Cm00642%3A256%3A110%7Cm00655%3A0%3A2999
 m00772%3A0%3A76%7Cm00216%3A240%3A110%7Cm00773%3A0%3A3235
 m00747%3A0%3A2807%7Cm00352%3A4912%3A98%7Cm00748%3A0%3A21%7Cm00108%3A240%3A96%7Cm00749%3A0%3A21%7Cm00679%3A16%3A105%7Cm00750%3A0%3A415
-m00352%3A0%3A108%7Cm01216%3A0%3A44%7Cm00993%3A208%3A97%7Cm01217%3A0%3A96%7Cm01082%3A144%3A148%7Cm01218%3A0%3A1471
+m00352%3A0%3A108%7Cm01214%3A0%3A44%7Cm00993%3A208%3A97%7Cm01215%3A0%3A96%7Cm01080%3A144%3A148%7Cm01216%3A0%3A1471
 m00125%3A0%3A1730%7Cm00003%3A2224%3A266%7Cm00126%3A0%3A202%7Cm00003%3A3344%3A115%7Cm00127%3A0%3A405%7Cm00003%3A2640%3A100%7Cm00128%3A0%3A2436%7Cm00003%3A12032%3A192%7Cm00129%3A0%3A1391%7Cm00003%3A2640%3A99%7Cm00130%3A0%3A138%7Cm00003%3A2640%3A99%7Cm00131%3A0%3A193%7Cm00003%3A2640%3A99%7Cm00132%3A0%3A143%7Cm00003%3A2640%3A99%7Cm00133%3A0%3A1915
-m00352%3A0%3A112%7Cm01328%3A0%3A1609
+m00352%3A0%3A112%7Cm01326%3A0%3A1609
 m01026%3A0%3A2597
 m00055%3A0%3A105%7Cm00495%3A0%3A4774
 m00696%3A0%3A709%7Cm00151%3A80%3A97%7Cm00697%3A0%3A542%7Cm00066%3A5408%3A125%7Cm00698%3A0%3A261%7Cm00066%3A2704%3A146%7Cm00699%3A0%3A1849
 m00055%3A0%3A104%7Cm00569%3A0%3A95%7Cm00559%3A96%3A268%7Cm00475%3A384%3A252%7Cm00560%3A0%3A277%7Cm00339%3A2864%3A136%7Cm00561%3A0%3A179%7Cm00570%3A0%3A72%7Cm00561%3A256%3A284%7Cm00475%3A1408%3A206%7Cm00562%3A0%3A4%7Cm00063%3A4784%3A113%7Cm00563%3A0%3A25%7Cm00063%3A5120%3A162%7Cm00564%3A0%3A275%7Cm00475%3A2448%3A171%7Cm00565%3A0%3A237%7Cm00339%3A480%3A122%7Cm00566%3A0%3A47%7Cm00064%3A960%3A216%7Cm00567%3A0%3A331%7Cm00064%3A512%3A131%7Cm00568%3A0%3A585%7Cm00096%3A0%3A2
 m00657%3A0%3A693%7Cm00062%3A8160%3A128%7Cm00658%3A0%3A382%7Cm00380%3A304%3A108%7Cm00659%3A0%3A2568
 m00283%3A0%3A7592
-m00631%3A0%3A102%7Cm01091%3A0%3A2349
+m00631%3A0%3A102%7Cm01089%3A0%3A2349
 m00055%3A0%3A104%7Cm00559%3A0%3A364%7Cm00475%3A384%3A252%7Cm00560%3A0%3A277%7Cm00339%3A2864%3A136%7Cm00561%3A0%3A540%7Cm00475%3A1408%3A206%7Cm00562%3A0%3A4%7Cm00063%3A4784%3A113%7Cm00563%3A0%3A25%7Cm00063%3A5120%3A162%7Cm00564%3A0%3A275%7Cm00475%3A2448%3A171%7Cm00565%3A0%3A237%7Cm00339%3A480%3A122%7Cm00566%3A0%3A47%7Cm00064%3A960%3A216%7Cm00567%3A0%3A331%7Cm00064%3A512%3A131%7Cm00568%3A0%3A585
 m00055%3A0%3A104%7Cm00571%3A0%3A97%7Cm00559%3A96%3A268%7Cm00475%3A384%3A252%7Cm00560%3A0%3A277%7Cm00339%3A2864%3A136%7Cm00561%3A0%3A179%7Cm00572%3A0%3A74%7Cm00561%3A256%3A284%7Cm00475%3A1408%3A206%7Cm00562%3A0%3A4%7Cm00063%3A4784%3A113%7Cm00563%3A0%3A25%7Cm00063%3A5120%3A162%7Cm00564%3A0%3A244%7Cm00573%3A0%3A32%7Cm00475%3A2448%3A234%7Cm00574%3A0%3A2%7Cm00565%3A64%3A105%7Cm00575%3A0%3A69%7Cm00339%3A480%3A122%7Cm00576%3A0%3A48%7Cm00064%3A960%3A101%7Cm00577%3A0%3A13%7Cm00475%3A3280%3A104%7Cm00578%3A0%3A121%7Cm00567%3A128%3A146%7Cm00579%3A0%3A54%7Cm00064%3A512%3A101%7Cm00580%3A0%3A200%7Cm00568%3A160%3A284%7Cm00581%3A0%3A131
 m00320%3A0%3A363%7Cm00321%3A0%3A25%7Cm00320%3A416%3A432%7Cm00322%3A0%3A93%7Cm00320%3A928%3A2248%7Cm00323%3A0%3A213%7Cm00320%3A3520%3A3695
@@ -6009,7 +6672,7 @@ m00271%3A0%3A185%7Cm00332%3A0%3A6313%7Cm00274%3A560%3A160
 m00055%3A0%3A104%7Cm00315%3A0%3A267%7Cm00055%3A1024%3A99%7Cm00316%3A0%3A427%7Cm00237%3A176%3A116%7Cm00317%3A0%3A959%7Cm00238%3A2064%3A134%7Cm00318%3A0%3A4857%7Cm00056%3A10864%3A118%7Cm00319%3A0%3A174
 m00271%3A0%3A1524%7Cm00215%3A4464%3A97%7Cm00272%3A0%3A96%7Cm00215%3A4576%3A103%7Cm00273%3A0%3A5092%7Cm00108%3A240%3A96%7Cm00274%3A0%3A720
 m00182%3A0%3A102%7Cm00296%3A0%3A4315%7Cm00271%3A976%3A114%7Cm00297%3A0%3A2841%7Cm00274%3A624%3A96
-m00631%3A0%3A102%7Cm01114%3A0%3A2223
+m00631%3A0%3A102%7Cm01112%3A0%3A2223
 m00055%3A0%3A103%7Cm00685%3A0%3A410%7Cm00475%3A400%3A124%7Cm00686%3A0%3A1004%7Cm00594%3A1008%3A112%7Cm00687%3A0%3A30%7Cm00063%3A4736%3A116%7Cm00688%3A0%3A501%7Cm00598%3A0%3A101%7Cm00689%3A0%3A883%7Cm00475%3A4448%3A207%7Cm00690%3A0%3A190
 m00353%3A0%3A1801%7Cm00183%3A2400%3A248%7Cm00354%3A0%3A86%7Cm00240%3A208%3A101%7Cm00355%3A0%3A602%7Cm00240%3A1904%3A96%7Cm00356%3A0%3A3410
 m00239%3A0%3A178%7Cm00298%3A0%3A15%7Cm00239%3A192%3A1753%7Cm00299%3A0%3A22%7Cm00239%3A1952%3A209%7Cm00300%3A0%3A1%7Cm00239%3A2192%3A101%7Cm00301%3A0%3A2%7Cm00239%3A2336%3A101%7Cm00302%3A0%3A6%7Cm00183%3A2480%3A134%7Cm00303%3A0%3A52%7Cm00240%3A128%3A578%7Cm00298%3A0%3A15%7Cm00240%3A720%3A372%7Cm00304%3A0%3A93%7Cm00240%3A1456%3A638%7Cm00305%3A0%3A141%7Cm00240%3A2304%3A185%7Cm00306%3A0%3A90%7Cm00240%3A2608%3A232%7Cm00307%3A0%3A111%7Cm00240%3A2960%3A702%7Cm00308%3A0%3A4%7Cm00240%3A3696%3A538%7Cm00309%3A0%3A16%7Cm00240%3A4240%3A126%7Cm00310%3A0%3A19%7Cm00240%3A4384%3A166%7Cm00311%3A0%3A57%7Cm00240%3A4672%3A139%7Cm00312%3A0%3A22%7Cm00240%3A4832%3A109%7Cm00313%3A0%3A78%7Cm00240%3A4960%3A145%7Cm00314%3A0%3A126
@@ -6018,144 +6681,144 @@ m00066%3A0%3A11953
 m00182%3A0%3A1500%7Cm00066%3A2928%3A116%7Cm00183%3A0%3A6633
 m00379%3A0%3A673%7Cm00151%3A80%3A97%7Cm00380%3A0%3A993%7Cm00066%3A6256%3A130%7Cm00381%3A0%3A4042
 m00353%3A0%3A151%7Cm00428%3A0%3A157%7Cm00353%3A320%3A100%7Cm00429%3A0%3A260%7Cm00239%3A1152%3A146%7Cm00430%3A0%3A845%7Cm00183%3A2400%3A214%7Cm00431%3A0%3A114%7Cm00240%3A208%3A150%7Cm00432%3A0%3A11%7Cm00183%3A2224%3A120%7Cm00433%3A0%3A623%7Cm00240%3A1904%3A99%7Cm00434%3A0%3A12%7Cm00356%3A320%3A230%7Cm00435%3A0%3A1155%7Cm00356%3A2048%3A114%7Cm00436%3A0%3A916
-m00063%3A0%3A106%7Cm01264%3A0%3A53%7Cm01169%3A416%3A108%7Cm01265%3A0%3A1597
-m01600%3A0%3A143%7Cm00540%3A112%3A156%7Cm01601%3A0%3A717%7Cm01594%3A800%3A137%7Cm01602%3A0%3A7
-m01806%3A0%3A877
-m01811%3A0%3A869
-m01888%3A0%3A722
-m01866%3A0%3A48%7Cm01811%3A48%3A121%7Cm02008%3A0%3A319
-m01607%3A0%3A112%7Cm01857%3A0%3A315%7Cm00380%3A240%3A120%7Cm01858%3A0%3A100%7Cm00053%3A1424%3A108%7Cm01234%3A0%3A31
-m00164%3A0%3A106%7Cm01433%3A0%3A213%7Cm00053%3A4128%3A116%7Cm01434%3A0%3A820%7Cm00053%3A1424%3A108%7Cm01435%3A0%3A87
-m00055%3A0%3A104%7Cm01304%3A0%3A91%7Cm00336%3A96%3A126%7Cm01305%3A0%3A95%7Cm01013%3A1344%3A96%7Cm01247%3A0%3A31%7Cm00237%3A560%3A131%7Cm01306%3A0%3A1109
+m00063%3A0%3A106%7Cm01262%3A0%3A53%7Cm01167%3A416%3A108%7Cm01263%3A0%3A1597
+m01598%3A0%3A143%7Cm00540%3A112%3A156%7Cm01599%3A0%3A717%7Cm01592%3A800%3A137%7Cm01600%3A0%3A7
+m01804%3A0%3A877
+m01809%3A0%3A869
+m01886%3A0%3A722
+m01864%3A0%3A48%7Cm01809%3A48%3A121%7Cm02006%3A0%3A319
+m01605%3A0%3A112%7Cm01855%3A0%3A315%7Cm00380%3A240%3A120%7Cm01856%3A0%3A100%7Cm00053%3A1424%3A108%7Cm01232%3A0%3A31
+m00164%3A0%3A106%7Cm01431%3A0%3A213%7Cm00053%3A4128%3A116%7Cm01432%3A0%3A820%7Cm00053%3A1424%3A108%7Cm01433%3A0%3A87
+m00055%3A0%3A104%7Cm01302%3A0%3A91%7Cm00336%3A96%3A126%7Cm01303%3A0%3A95%7Cm01013%3A1344%3A96%7Cm01245%3A0%3A31%7Cm00237%3A560%3A131%7Cm01304%3A0%3A1109
 m00754%3A0%3A8%7Cm00054%3A96%3A111%7Cm00755%3A0%3A3439
-m00631%3A0%3A102%7Cm01388%3A0%3A1304%7Cm00386%3A32%3A113%7Cm01389%3A0%3A22
-m00631%3A0%3A102%7Cm01478%3A0%3A379%7Cm01180%3A800%3A101%7Cm01479%3A0%3A646%7Cm00056%3A10864%3A110%7Cm01389%3A0%3A22
-m00055%3A0%3A104%7Cm01270%3A0%3A1618%7Cm00386%3A32%3A113%7Cm00784%3A0%3A23
-m01169%3A0%3A2042%7Cm00056%3A10864%3A110%7Cm00784%3A0%3A23
-m01360%3A0%3A1625
-m00164%3A0%3A118%7Cm01107%3A0%3A2010%7Cm00053%3A1424%3A108%7Cm01108%3A0%3A122
-m01230%3A0%3A14%7Cm00507%3A16%3A109%7Cm01231%3A0%3A250%7Cm00066%3A2608%3A251%7Cm01232%3A0%3A49%7Cm00066%3A2944%3A287%7Cm00153%3A0%3A4%7Cm00066%3A3248%3A219%7Cm01233%3A0%3A590%7Cm00508%3A3968%3A110%7Cm01234%3A0%3A31
+m00631%3A0%3A102%7Cm01386%3A0%3A1304%7Cm00386%3A32%3A113%7Cm01387%3A0%3A22
+m00631%3A0%3A102%7Cm01476%3A0%3A379%7Cm01178%3A800%3A101%7Cm01477%3A0%3A646%7Cm00056%3A10864%3A110%7Cm01387%3A0%3A22
+m00055%3A0%3A104%7Cm01268%3A0%3A1618%7Cm00386%3A32%3A113%7Cm00784%3A0%3A23
+m01167%3A0%3A2042%7Cm00056%3A10864%3A110%7Cm00784%3A0%3A23
+m01358%3A0%3A1625
+m00164%3A0%3A118%7Cm01105%3A0%3A2010%7Cm00053%3A1424%3A108%7Cm01106%3A0%3A122
+m01228%3A0%3A14%7Cm00507%3A16%3A109%7Cm01229%3A0%3A250%7Cm00066%3A2608%3A251%7Cm01230%3A0%3A49%7Cm00066%3A2944%3A287%7Cm00153%3A0%3A4%7Cm00066%3A3248%3A219%7Cm01231%3A0%3A590%7Cm00508%3A3968%3A110%7Cm01232%3A0%3A31
 m00682%3A0%3A210%7Cm00764%3A0%3A2623%7Cm00755%3A2512%3A101%7Cm00765%3A0%3A604
-m00543%3A0%3A153%7Cm01454%3A0%3A1260
-m01035%3A0%3A30%7Cm00216%3A240%3A110%7Cm00773%3A0%3A138%7Cm01701%3A0%3A184%7Cm01677%3A112%3A100%7Cm01702%3A0%3A449
+m00543%3A0%3A153%7Cm01452%3A0%3A1260
+m01035%3A0%3A30%7Cm00216%3A240%3A110%7Cm00773%3A0%3A138%7Cm01699%3A0%3A184%7Cm01675%3A112%3A100%7Cm01700%3A0%3A449
 m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm00867%3A0%3A164%7Cm00946%3A0%3A8%7Cm00867%3A176%3A128%7Cm00003%3A2640%3A100%7Cm00947%3A0%3A839%7Cm00868%3A592%3A102%7Cm00948%3A0%3A10%7Cm00868%3A704%3A108%7Cm00949%3A0%3A1194
-m00352%3A0%3A118%7Cm01491%3A0%3A12%7Cm01328%3A16%3A189%7Cm01492%3A0%3A1015
-m01563%3A0%3A48%7Cm01424%3A48%3A127%7Cm01666%3A0%3A878
-m01201%3A0%3A2010
-m01170%3A0%3A2175
-m00352%3A0%3A108%7Cm01336%3A0%3A49%7Cm00902%3A32%3A99%7Cm01337%3A0%3A1433
+m00352%3A0%3A118%7Cm01489%3A0%3A12%7Cm01326%3A16%3A189%7Cm01490%3A0%3A1015
+m01561%3A0%3A48%7Cm01422%3A48%3A127%7Cm01664%3A0%3A878
+m01199%3A0%3A2010
+m01168%3A0%3A2175
+m00352%3A0%3A108%7Cm01334%3A0%3A49%7Cm00902%3A32%3A99%7Cm01335%3A0%3A1433
 m00231%3A0%3A1642%7Cm00003%3A2224%3A96%7Cm00232%3A0%3A2%7Cm00003%3A2320%3A169%7Cm00233%3A0%3A2336%7Cm00064%3A2496%3A125%7Cm00234%3A0%3A625%7Cm00122%3A848%3A178%7Cm00052%3A8016%3A137%7Cm00235%3A0%3A2700
 m00053%3A0%3A13509
 m00063%3A0%3A106%7Cm00837%3A0%3A555%7Cm00783%3A496%3A133%7Cm00838%3A0%3A14%7Cm00783%3A640%3A96%7Cm00839%3A0%3A88%7Cm00783%3A832%3A145%7Cm00840%3A0%3A537%7Cm00783%3A1440%3A111%7Cm00841%3A0%3A53%7Cm00783%3A1600%3A100%7Cm00842%3A0%3A17%7Cm00783%3A1712%3A99%7Cm00843%3A0%3A103%7Cm00783%3A1904%3A103%7Cm00844%3A0%3A689%7Cm00386%3A32%3A113%7Cm00784%3A0%3A23
 m00055%3A0%3A1881%7Cm00054%3A5040%3A162%7Cm00056%3A0%3A11009
 m00509%3A0%3A456%7Cm00469%3A128%3A143%7Cm00534%3A0%3A183%7Cm00510%3A80%3A104%7Cm00535%3A0%3A86%7Cm00510%3A192%3A343%7Cm00536%3A0%3A71%7Cm00510%3A816%3A933%7Cm00537%3A0%3A186%7Cm00510%3A1952%3A186%7Cm00538%3A0%3A20%7Cm00510%3A2240%3A133%7Cm00539%3A0%3A104%7Cm00169%3A4704%3A97%7Cm00331%3A0%3A101%7Cm00511%3A0%3A1255
 m00058%3A0%3A12492
-m01076%3A0%3A32%7Cm00900%3A32%3A181%7Cm01741%3A0%3A342%7Cm01088%3A96%3A105%7Cm01410%3A0%3A46%7Cm00464%3A1168%3A105%7Cm01742%3A0%3A148
-m01626%3A0%3A1122
-m01980%3A0%3A69%7Cm01576%3A80%3A112%7Cm01981%3A0%3A376
-m00657%3A0%3A119%7Cm01714%3A0%3A880
-m01513%3A0%3A194%7Cm01787%3A0%3A712
-m01361%3A0%3A110%7Cm02082%3A0%3A123
-m01361%3A0%3A110%7Cm02083%3A0%3A26%7Cm02075%3A48%3A97
-m00666%3A0%3A135%7Cm02075%3A0%3A145
-m01361%3A0%3A110%7Cm02081%3A0%3A124
-m01361%3A0%3A106%7Cm02086%3A0%3A23%7Cm02075%3A48%3A97
-m01361%3A0%3A110%7Cm02084%3A0%3A123
-m01361%3A0%3A106%7Cm02090%3A0%3A118
-m01361%3A0%3A106%7Cm02087%3A0%3A120
-m01361%3A0%3A106%7Cm02088%3A0%3A21%7Cm02052%3A0%3A97%7Cm00096%3A0%3A2
-m01361%3A0%3A106%7Cm02085%3A0%3A121
-m01361%3A0%3A110%7Cm02079%3A0%3A35%7Cm02075%3A48%3A97
-m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm00632%3A0%3A14%7Cm00583%3A16%3A152%7Cm01149%3A0%3A129%7Cm00583%3A320%3A105%7Cm01150%3A0%3A634%7Cm00584%3A784%3A142%7Cm01151%3A0%3A426%7Cm00584%3A3056%3A143%7Cm01152%3A0%3A122
-m00055%3A0%3A103%7Cm01235%3A0%3A385%7Cm00475%3A544%3A102%7Cm01236%3A0%3A184%7Cm01119%3A400%3A121%7Cm01237%3A0%3A568%7Cm01119%3A1136%3A109%7Cm01238%3A0%3A336
-m01607%3A0%3A992%7Cm00519%3A2352%3A139%7Cm01608%3A0%3A14
-m01866%3A0%3A48%7Cm02043%3A48%3A144%7Cm02046%3A0%3A89%7Cm02045%3A112%3A112
-m01866%3A0%3A48%7Cm02043%3A48%3A144%7Cm02047%3A0%3A201
-m01866%3A0%3A48%7Cm02043%3A48%3A144%7Cm02047%3A0%3A102%7Cm02048%3A0%3A99
-m02043%3A0%3A395
-m01866%3A0%3A48%7Cm02043%3A48%3A246%7Cm02049%3A0%3A99
-m01866%3A0%3A48%7Cm02043%3A48%3A246%7Cm02050%3A0%3A99
-m01866%3A0%3A48%7Cm02043%3A48%3A246%7Cm02051%3A0%3A99
-m02036%3A0%3A421
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02045%3A0%3A126%7Cm02057%3A0%3A95
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02045%3A0%3A125%7Cm02056%3A0%3A1%7Cm02045%3A128%3A96
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02045%3A0%3A224
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02045%3A0%3A125%7Cm02052%3A0%3A98
-m00631%3A0%3A102%7Cm01818%3A0%3A10%7Cm00583%3A16%3A145%7Cm01908%3A0%3A25%7Cm01819%3A48%3A216%7Cm01883%3A0%3A182%7Cm00096%3A0%3A2
-m00631%3A0%3A102%7Cm01818%3A0%3A10%7Cm00583%3A16%3A145%7Cm01819%3A0%3A596
-m00229%3A0%3A4676%7Cm00001%3A14528%3A104%7Cm00230%3A0%3A3247
-m01331%3A0%3A99%7Cm01965%3A0%3A89%7Cm01855%3A96%3A105%7Cm01966%3A0%3A290
-m01605%3A0%3A18%7Cm00216%3A240%3A110%7Cm02000%3A0%3A58%7Cm00834%3A2496%3A119%7Cm02001%3A0%3A203
-m01659%3A0%3A39%7Cm00216%3A240%3A110%7Cm01660%3A0%3A1%7Cm00521%3A0%3A139%7Cm01661%3A0%3A345%7Cm00834%3A2496%3A119%7Cm01662%3A0%3A305
-m01893%3A0%3A20%7Cm00216%3A240%3A110%7Cm01894%3A0%3A206%7Cm00834%3A2496%3A119%7Cm01895%3A0%3A249
-m01495%3A0%3A32%7Cm01626%3A32%3A154%7Cm01903%3A0%3A507
-m01835%3A0%3A460%7Cm00834%3A2496%3A119%7Cm01836%3A0%3A237
-m01925%3A0%3A52%7Cm00216%3A240%3A110%7Cm01926%3A0%3A103%7Cm00834%3A2496%3A119%7Cm01927%3A0%3A260
-m01654%3A0%3A714%7Cm00834%3A2496%3A119%7Cm01655%3A0%3A240
-m01654%3A0%3A287%7Cm01725%3A0%3A348%7Cm00834%3A2496%3A119%7Cm01726%3A0%3A42%7Cm01655%3A48%3A190
-m00631%3A0%3A102%7Cm01818%3A0%3A10%7Cm00583%3A16%3A145%7Cm01882%3A0%3A85%7Cm01819%3A48%3A216%7Cm01883%3A0%3A182
-m01513%3A0%3A201%7Cm01837%3A0%3A614
-m01698%3A0%3A1017
-m01640%3A0%3A230%7Cm00583%3A16%3A122%7Cm01641%3A0%3A757
-m01513%3A0%3A194%7Cm01842%3A0%3A97%7Cm01837%3A64%3A100%7Cm01843%3A0%3A412
-m01513%3A0%3A202%7Cm01874%3A0%3A19%7Cm01855%3A48%3A334%7Cm01843%3A208%3A111%7Cm01875%3A0%3A96
-m01513%3A0%3A202%7Cm01855%3A0%3A382%7Cm01843%3A208%3A111%7Cm01856%3A0%3A94
-m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01956%3A0%3A119%7Cm00834%3A2496%3A119%7Cm01957%3A0%3A185
-m01734%3A0%3A484%7Cm01725%3A240%3A101%7Cm01735%3A0%3A389
-m00631%3A0%3A102%7Cm01473%3A0%3A115%7Cm00706%3A96%3A101%7Cm01474%3A0%3A112%7Cm00706%3A368%3A109%7Cm01475%3A0%3A300%7Cm00710%3A368%3A99%7Cm01476%3A0%3A115%7Cm00710%3A576%3A214%7Cm01477%3A0%3A96
-m02040%3A0%3A233%7Cm01992%3A352%3A166
-m00271%3A0%3A130%7Cm01771%3A0%3A455%7Cm00901%3A0%3A131%7Cm01772%3A0%3A40%7Cm00901%3A160%3A104%7Cm01773%3A0%3A69
-m00271%3A0%3A198%7Cm01673%3A0%3A267%7Cm00877%3A864%3A96%7Cm01674%3A0%3A35%7Cm00464%3A1152%3A121%7Cm00901%3A0%3A131%7Cm01675%3A0%3A23%7Cm00901%3A160%3A119%7Cm01676%3A0%3A56
-m01230%3A0%3A14%7Cm00999%3A16%3A139%7Cm01816%3A0%3A150%7Cm01804%3A176%3A111%7Cm00207%3A0%3A1%7Cm01804%3A288%3A279%7Cm01817%3A0%3A28%7Cm00901%3A160%3A119%7Cm01805%3A0%3A13
-m01964%3A0%3A434%7Cm01804%3A336%3A126%7Cm01934%3A0%3A30
-m01831%3A0%3A32%7Cm01964%3A32%3A232%7Cm01967%3A0%3A32%7Cm01964%3A304%3A130%7Cm01804%3A336%3A126%7Cm01934%3A0%3A30
-m00055%3A0%3A104%7Cm00585%3A0%3A100%7Cm01412%3A0%3A62%7Cm01284%3A368%3A96%7Cm01413%3A0%3A40%7Cm00237%3A560%3A131%7Cm01414%3A0%3A970
-m00631%3A0%3A102%7Cm01968%3A0%3A479
-m01996%3A0%3A330%7Cm01992%3A336%3A182
-m01997%3A0%3A159%7Cm01996%3A160%3A162%7Cm01998%3A0%3A8%7Cm01992%3A336%3A182
-m01866%3A0%3A48%7Cm01997%3A48%3A111%7Cm01996%3A160%3A162%7Cm01999%3A0%3A8%7Cm01992%3A336%3A182
-m01993%3A0%3A159%7Cm01992%3A160%3A358
-m01992%3A0%3A518
-m01230%3A0%3A14%7Cm00999%3A16%3A139%7Cm01804%3A0%3A596%7Cm00901%3A160%3A119%7Cm01805%3A0%3A13
-m00055%3A0%3A104%7Cm01839%3A0%3A182%7Cm01430%3A96%3A105%7Cm01840%3A0%3A218%7Cm00242%3A656%3A126%7Cm01841%3A0%3A76
-m00055%3A0%3A103%7Cm01117%3A0%3A168%7Cm00583%3A0%3A138%7Cm01118%3A0%3A35%7Cm00993%3A160%3A252%7Cm01119%3A0%3A1625
-m01230%3A0%3A14%7Cm00507%3A16%3A109%7Cm01759%3A0%3A220%7Cm01607%3A272%3A100%7Cm01760%3A0%3A30%7Cm01351%3A32%3A99%7Cm01761%3A0%3A5%7Cm00806%3A32%3A99%7Cm01762%3A0%3A76%7Cm00053%3A1424%3A108%7Cm01763%3A0%3A80
-m01797%3A0%3A894
-m00682%3A0%3A297%7Cm01648%3A0%3A74%7Cm00764%3A176%3A102%7Cm01716%3A0%3A86%7Cm01088%3A96%3A105%7Cm01717%3A0%3A19%7Cm01471%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01472%3A0%3A71
-m01437%3A0%3A14%7Cm01408%3A16%3A147%7Cm01932%3A0%3A162%7Cm01088%3A96%3A105%7Cm01933%3A0%3A33%7Cm01804%3A320%3A142%7Cm01934%3A0%3A30
-m01846%3A0%3A9%7Cm00057%3A96%3A138%7Cm01847%3A0%3A40%7Cm01107%3A0%3A100%7Cm01848%3A0%3A154%7Cm01088%3A96%3A105%7Cm01849%3A0%3A42%7Cm00755%3A2928%3A107%7Cm01850%3A0%3A102
-m01437%3A0%3A14%7Cm01408%3A16%3A147%7Cm01935%3A0%3A32%7Cm01932%3A32%3A130%7Cm01088%3A96%3A105%7Cm01933%3A0%3A33%7Cm01804%3A320%3A142%7Cm01934%3A0%3A30
-m00164%3A0%3A106%7Cm01525%3A0%3A287%7Cm00877%3A864%3A96%7Cm01526%3A0%3A30%7Cm01351%3A32%3A99%7Cm01527%3A0%3A151%7Cm00546%3A2144%3A125%7Cm01528%3A0%3A210%7Cm00053%3A1424%3A108%7Cm01529%3A0%3A79
-m00682%3A0%3A297%7Cm01648%3A0%3A74%7Cm00764%3A176%3A102%7Cm01709%3A0%3A87%7Cm01088%3A96%3A105%7Cm01710%3A0%3A20%7Cm01471%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01711%3A0%3A73
-m00682%3A0%3A297%7Cm01648%3A0%3A74%7Cm00764%3A176%3A102%7Cm01718%3A0%3A75%7Cm01088%3A96%3A105%7Cm01719%3A0%3A25%7Cm01471%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01720%3A0%3A75
-m00682%3A0%3A297%7Cm01648%3A0%3A74%7Cm00764%3A176%3A102%7Cm01649%3A0%3A178%7Cm01088%3A96%3A105%7Cm01650%3A0%3A14%7Cm01471%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01651%3A0%3A69
-m00682%3A0%3A297%7Cm01648%3A0%3A74%7Cm00764%3A176%3A102%7Cm01721%3A0%3A85%7Cm01088%3A96%3A105%7Cm01722%3A0%3A17%7Cm01471%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01711%3A0%3A73
-m02032%3A0%3A55%7Cm01626%3A80%3A106%7Cm02033%3A0%3A271
-m02032%3A0%3A55%7Cm01626%3A80%3A106%7Cm02033%3A0%3A179%7Cm02037%3A0%3A75
-m01052%3A0%3A644%7Cm00002%3A5920%3A245%7Cm01053%3A0%3A261%7Cm00002%3A6192%3A118%7Cm01054%3A0%3A1273
+m01074%3A0%3A32%7Cm00900%3A32%3A181%7Cm01739%3A0%3A342%7Cm01086%3A96%3A105%7Cm01408%3A0%3A46%7Cm00464%3A1168%3A105%7Cm01740%3A0%3A148
+m01624%3A0%3A1122
+m01978%3A0%3A69%7Cm01574%3A80%3A112%7Cm01979%3A0%3A376
+m00657%3A0%3A119%7Cm01712%3A0%3A880
+m01511%3A0%3A194%7Cm01785%3A0%3A712
+m01359%3A0%3A110%7Cm02080%3A0%3A123
+m01359%3A0%3A110%7Cm02081%3A0%3A26%7Cm02073%3A48%3A97
+m00666%3A0%3A135%7Cm02073%3A0%3A145
+m01359%3A0%3A110%7Cm02079%3A0%3A124
+m01359%3A0%3A106%7Cm02084%3A0%3A23%7Cm02073%3A48%3A97
+m01359%3A0%3A110%7Cm02082%3A0%3A123
+m01359%3A0%3A106%7Cm02088%3A0%3A118
+m01359%3A0%3A106%7Cm02085%3A0%3A120
+m01359%3A0%3A106%7Cm02086%3A0%3A21%7Cm02050%3A0%3A97%7Cm00096%3A0%3A2
+m01359%3A0%3A106%7Cm02083%3A0%3A121
+m01359%3A0%3A110%7Cm02077%3A0%3A35%7Cm02073%3A48%3A97
+m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm00632%3A0%3A14%7Cm00583%3A16%3A152%7Cm01147%3A0%3A129%7Cm00583%3A320%3A105%7Cm01148%3A0%3A634%7Cm00584%3A784%3A142%7Cm01149%3A0%3A426%7Cm00584%3A3056%3A143%7Cm01150%3A0%3A122
+m00055%3A0%3A103%7Cm01233%3A0%3A385%7Cm00475%3A544%3A102%7Cm01234%3A0%3A184%7Cm01117%3A400%3A121%7Cm01235%3A0%3A568%7Cm01117%3A1136%3A109%7Cm01236%3A0%3A336
+m01605%3A0%3A992%7Cm00519%3A2352%3A139%7Cm01606%3A0%3A14
+m01864%3A0%3A48%7Cm02041%3A48%3A144%7Cm02044%3A0%3A89%7Cm02043%3A112%3A112
+m01864%3A0%3A48%7Cm02041%3A48%3A144%7Cm02045%3A0%3A201
+m01864%3A0%3A48%7Cm02041%3A48%3A144%7Cm02045%3A0%3A102%7Cm02046%3A0%3A99
+m02041%3A0%3A395
+m01864%3A0%3A48%7Cm02041%3A48%3A246%7Cm02047%3A0%3A99
+m01864%3A0%3A48%7Cm02041%3A48%3A246%7Cm02048%3A0%3A99
+m01864%3A0%3A48%7Cm02041%3A48%3A246%7Cm02049%3A0%3A99
+m02034%3A0%3A421
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02043%3A0%3A126%7Cm02055%3A0%3A95
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02043%3A0%3A125%7Cm02054%3A0%3A1%7Cm02043%3A128%3A96
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02043%3A0%3A224
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02043%3A0%3A125%7Cm02050%3A0%3A98
+m00631%3A0%3A102%7Cm01816%3A0%3A10%7Cm00583%3A16%3A145%7Cm01906%3A0%3A25%7Cm01817%3A48%3A216%7Cm01881%3A0%3A182%7Cm00096%3A0%3A2
+m00631%3A0%3A102%7Cm01816%3A0%3A10%7Cm00583%3A16%3A145%7Cm01817%3A0%3A596
+m00229%3A0%3A4676%7Cm00002%3A14528%3A104%7Cm00230%3A0%3A3247
+m01329%3A0%3A99%7Cm01963%3A0%3A89%7Cm01853%3A96%3A105%7Cm01964%3A0%3A290
+m01603%3A0%3A18%7Cm00216%3A240%3A110%7Cm01998%3A0%3A58%7Cm00834%3A2496%3A119%7Cm01999%3A0%3A203
+m01657%3A0%3A39%7Cm00216%3A240%3A110%7Cm01658%3A0%3A1%7Cm00521%3A0%3A139%7Cm01659%3A0%3A345%7Cm00834%3A2496%3A119%7Cm01660%3A0%3A305
+m01891%3A0%3A20%7Cm00216%3A240%3A110%7Cm01892%3A0%3A206%7Cm00834%3A2496%3A119%7Cm01893%3A0%3A249
+m01493%3A0%3A32%7Cm01624%3A32%3A154%7Cm01901%3A0%3A507
+m01833%3A0%3A460%7Cm00834%3A2496%3A119%7Cm01834%3A0%3A237
+m01923%3A0%3A52%7Cm00216%3A240%3A110%7Cm01924%3A0%3A103%7Cm00834%3A2496%3A119%7Cm01925%3A0%3A260
+m01652%3A0%3A714%7Cm00834%3A2496%3A119%7Cm01653%3A0%3A240
+m01652%3A0%3A287%7Cm01723%3A0%3A348%7Cm00834%3A2496%3A119%7Cm01724%3A0%3A42%7Cm01653%3A48%3A190
+m00631%3A0%3A102%7Cm01816%3A0%3A10%7Cm00583%3A16%3A145%7Cm01880%3A0%3A85%7Cm01817%3A48%3A216%7Cm01881%3A0%3A182
+m01511%3A0%3A201%7Cm01835%3A0%3A614
+m01696%3A0%3A1017
+m01638%3A0%3A230%7Cm00583%3A16%3A122%7Cm01639%3A0%3A757
+m01511%3A0%3A194%7Cm01840%3A0%3A97%7Cm01835%3A64%3A100%7Cm01841%3A0%3A412
+m01511%3A0%3A202%7Cm01872%3A0%3A19%7Cm01853%3A48%3A334%7Cm01841%3A208%3A111%7Cm01873%3A0%3A96
+m01511%3A0%3A202%7Cm01853%3A0%3A382%7Cm01841%3A208%3A111%7Cm01854%3A0%3A94
+m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01954%3A0%3A119%7Cm00834%3A2496%3A119%7Cm01955%3A0%3A185
+m01732%3A0%3A484%7Cm01723%3A240%3A101%7Cm01733%3A0%3A389
+m00631%3A0%3A102%7Cm01471%3A0%3A115%7Cm00706%3A96%3A101%7Cm01472%3A0%3A112%7Cm00706%3A368%3A109%7Cm01473%3A0%3A300%7Cm00710%3A368%3A99%7Cm01474%3A0%3A115%7Cm00710%3A576%3A214%7Cm01475%3A0%3A96
+m02038%3A0%3A233%7Cm01990%3A352%3A166
+m00271%3A0%3A130%7Cm01769%3A0%3A455%7Cm00901%3A0%3A131%7Cm01770%3A0%3A40%7Cm00901%3A160%3A104%7Cm01771%3A0%3A69
+m00271%3A0%3A198%7Cm01671%3A0%3A267%7Cm00877%3A864%3A96%7Cm01672%3A0%3A35%7Cm00464%3A1152%3A121%7Cm00901%3A0%3A131%7Cm01673%3A0%3A23%7Cm00901%3A160%3A119%7Cm01674%3A0%3A56
+m01228%3A0%3A14%7Cm00999%3A16%3A139%7Cm01814%3A0%3A150%7Cm01802%3A176%3A111%7Cm00207%3A0%3A1%7Cm01802%3A288%3A279%7Cm01815%3A0%3A28%7Cm00901%3A160%3A119%7Cm01803%3A0%3A13
+m01962%3A0%3A434%7Cm01802%3A336%3A126%7Cm01932%3A0%3A30
+m01829%3A0%3A32%7Cm01962%3A32%3A232%7Cm01965%3A0%3A32%7Cm01962%3A304%3A130%7Cm01802%3A336%3A126%7Cm01932%3A0%3A30
+m00055%3A0%3A104%7Cm00585%3A0%3A100%7Cm01410%3A0%3A62%7Cm01282%3A368%3A96%7Cm01411%3A0%3A40%7Cm00237%3A560%3A131%7Cm01412%3A0%3A970
+m00631%3A0%3A102%7Cm01966%3A0%3A479
+m01994%3A0%3A330%7Cm01990%3A336%3A182
+m01995%3A0%3A159%7Cm01994%3A160%3A162%7Cm01996%3A0%3A8%7Cm01990%3A336%3A182
+m01864%3A0%3A48%7Cm01995%3A48%3A111%7Cm01994%3A160%3A162%7Cm01997%3A0%3A8%7Cm01990%3A336%3A182
+m01991%3A0%3A159%7Cm01990%3A160%3A358
+m01990%3A0%3A518
+m01228%3A0%3A14%7Cm00999%3A16%3A139%7Cm01802%3A0%3A596%7Cm00901%3A160%3A119%7Cm01803%3A0%3A13
+m00055%3A0%3A104%7Cm01837%3A0%3A182%7Cm01428%3A96%3A105%7Cm01838%3A0%3A218%7Cm00242%3A656%3A126%7Cm01839%3A0%3A76
+m00055%3A0%3A103%7Cm01115%3A0%3A168%7Cm00583%3A0%3A138%7Cm01116%3A0%3A35%7Cm00993%3A160%3A252%7Cm01117%3A0%3A1625
+m01228%3A0%3A14%7Cm00507%3A16%3A109%7Cm01757%3A0%3A220%7Cm01605%3A272%3A100%7Cm01758%3A0%3A30%7Cm01349%3A32%3A99%7Cm01759%3A0%3A5%7Cm00806%3A32%3A99%7Cm01760%3A0%3A76%7Cm00053%3A1424%3A108%7Cm01761%3A0%3A80
+m01795%3A0%3A894
+m00682%3A0%3A297%7Cm01646%3A0%3A74%7Cm00764%3A176%3A102%7Cm01714%3A0%3A86%7Cm01086%3A96%3A105%7Cm01715%3A0%3A19%7Cm01469%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01470%3A0%3A71
+m01435%3A0%3A14%7Cm01406%3A16%3A147%7Cm01930%3A0%3A162%7Cm01086%3A96%3A105%7Cm01931%3A0%3A33%7Cm01802%3A320%3A142%7Cm01932%3A0%3A30
+m01844%3A0%3A9%7Cm00057%3A96%3A138%7Cm01845%3A0%3A40%7Cm01105%3A0%3A100%7Cm01846%3A0%3A154%7Cm01086%3A96%3A105%7Cm01847%3A0%3A42%7Cm00755%3A2928%3A107%7Cm01848%3A0%3A102
+m01435%3A0%3A14%7Cm01406%3A16%3A147%7Cm01933%3A0%3A32%7Cm01930%3A32%3A130%7Cm01086%3A96%3A105%7Cm01931%3A0%3A33%7Cm01802%3A320%3A142%7Cm01932%3A0%3A30
+m00164%3A0%3A106%7Cm01523%3A0%3A287%7Cm00877%3A864%3A96%7Cm01524%3A0%3A30%7Cm01349%3A32%3A99%7Cm01525%3A0%3A151%7Cm00546%3A2144%3A125%7Cm01526%3A0%3A210%7Cm00053%3A1424%3A108%7Cm01527%3A0%3A79
+m00682%3A0%3A297%7Cm01646%3A0%3A74%7Cm00764%3A176%3A102%7Cm01707%3A0%3A87%7Cm01086%3A96%3A105%7Cm01708%3A0%3A20%7Cm01469%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01709%3A0%3A73
+m00682%3A0%3A297%7Cm01646%3A0%3A74%7Cm00764%3A176%3A102%7Cm01716%3A0%3A75%7Cm01086%3A96%3A105%7Cm01717%3A0%3A25%7Cm01469%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01718%3A0%3A75
+m00682%3A0%3A297%7Cm01646%3A0%3A74%7Cm00764%3A176%3A102%7Cm01647%3A0%3A178%7Cm01086%3A96%3A105%7Cm01648%3A0%3A14%7Cm01469%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01649%3A0%3A69
+m00682%3A0%3A297%7Cm01646%3A0%3A74%7Cm00764%3A176%3A102%7Cm01719%3A0%3A85%7Cm01086%3A96%3A105%7Cm01720%3A0%3A17%7Cm01469%3A16%3A141%7Cm00546%3A2160%3A101%7Cm01709%3A0%3A73
+m02030%3A0%3A55%7Cm01624%3A80%3A106%7Cm02031%3A0%3A271
+m02030%3A0%3A55%7Cm01624%3A80%3A106%7Cm02031%3A0%3A179%7Cm02035%3A0%3A75
+m01052%3A0%3A2541
 m00933%3A0%3A97%7Cm00971%3A0%3A25%7Cm00682%3A176%3A119%7Cm00982%3A0%3A59%7Cm00972%3A64%3A953%7Cm00934%3A608%3A128%7Cm00973%3A0%3A164%7Cm00983%3A0%3A11%7Cm00973%3A176%3A202%7Cm00984%3A0%3A8%7Cm00973%3A400%3A899%7Cm00985%3A0%3A62
 m00933%3A0%3A97%7Cm00971%3A0%3A25%7Cm00682%3A176%3A119%7Cm00972%3A0%3A1017%7Cm00934%3A608%3A128%7Cm00973%3A0%3A1364
 m00933%3A0%3A97%7Cm00971%3A0%3A25%7Cm00682%3A176%3A119%7Cm00975%3A0%3A49%7Cm00972%3A64%3A953%7Cm00934%3A608%3A128%7Cm00973%3A0%3A164%7Cm00976%3A0%3A17%7Cm00973%3A176%3A202%7Cm00977%3A0%3A14%7Cm00973%3A400%3A899%7Cm00978%3A0%3A72
-m01334%3A0%3A557%7Cm00058%3A2656%3A147%7Cm01335%3A0%3A991
-m00352%3A0%3A118%7Cm01144%3A0%3A110%7Cm01521%3A0%3A132%7Cm01144%3A240%3A181%7Cm01522%3A0%3A7%7Cm01144%3A432%3A110%7Cm01523%3A0%3A157%7Cm01144%3A816%3A153%7Cm01524%3A0%3A337
+m01332%3A0%3A557%7Cm00058%3A2656%3A147%7Cm01333%3A0%3A991
+m00352%3A0%3A118%7Cm01142%3A0%3A110%7Cm01519%3A0%3A132%7Cm01142%3A240%3A181%7Cm01520%3A0%3A7%7Cm01142%3A432%3A110%7Cm01521%3A0%3A157%7Cm01142%3A816%3A153%7Cm01522%3A0%3A337
 m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm00867%3A0%3A304%7Cm00003%3A2640%3A100%7Cm00221%3A0%3A7%7Cm00618%3A256%3A249%7Cm00868%3A0%3A446%7Cm00869%3A0%3A2%7Cm00868%3A448%3A1772
 m00682%3A0%3A3217%7Cm00546%3A2160%3A101%7Cm00683%3A0%3A332%7Cm00057%3A12400%3A100%7Cm00684%3A0%3A71
-m01809%3A0%3A873
-m02016%3A0%3A462
-m02076%3A0%3A267
-m01920%3A0%3A664
-m01794%3A0%3A898
-m01361%3A0%3A1616
-m01432%3A0%3A1454
+m01807%3A0%3A873
+m02014%3A0%3A462
+m02074%3A0%3A267
+m01918%3A0%3A664
+m01792%3A0%3A898
+m01359%3A0%3A1616
+m01430%3A0%3A1454
 m00525%3A0%3A360%7Cm00074%3A208%3A108%7Cm00526%3A0%3A4020
 m00070%3A0%3A2026%7Cm00052%3A9136%3A141%7Cm00071%3A0%3A3938%7Cm00052%3A9920%3A137%7Cm00072%3A0%3A4999
-m01544%3A0%3A50%7Cm01348%3A48%3A109%7Cm01545%3A0%3A1101
+m01542%3A0%3A50%7Cm01346%3A48%3A109%7Cm01543%3A0%3A1101
 m00070%3A0%3A262%7Cm00097%3A0%3A68%7Cm00070%3A320%3A182%7Cm00098%3A0%3A968%7Cm00070%3A1680%3A107%7Cm00099%3A0%3A225%7Cm00066%3A6256%3A124%7Cm00100%3A0%3A171%7Cm00071%3A592%3A153%7Cm00101%3A0%3A776%7Cm00105%3A0%3A5%7Cm00101%3A880%3A3378%7Cm00072%3A1056%3A314%7Cm00102%3A0%3A1058%7Cm00072%3A2064%3A145%7Cm00103%3A0%3A603%7Cm00072%3A2688%3A192%7Cm00104%3A0%3A1524
-m01186%3A0%3A94%7Cm00525%3A144%3A115%7Cm01187%3A0%3A1137%7Cm00071%3A864%3A107%7Cm01188%3A0%3A622
+m01184%3A0%3A94%7Cm00525%3A144%3A115%7Cm01185%3A0%3A1137%7Cm00071%3A864%3A107%7Cm01186%3A0%3A622
 m00074%3A0%3A117%7Cm00446%3A0%3A117%7Cm00070%3A320%3A134%7Cm00447%3A0%3A708%7Cm00077%3A496%3A158%7Cm00448%3A0%3A373%7Cm00273%3A816%3A97%7Cm00449%3A0%3A175%7Cm00052%3A8016%3A137%7Cm00450%3A0%3A3381
-m00662%3A0%3A15%7Cm00074%3A16%3A101%7Cm01115%3A0%3A662%7Cm00071%3A864%3A107%7Cm01116%3A0%3A1439
+m00662%3A0%3A15%7Cm00074%3A16%3A101%7Cm01113%3A0%3A662%7Cm00071%3A864%3A107%7Cm01114%3A0%3A1439
 m00074%3A0%3A316%7Cm00070%3A320%3A134%7Cm00075%3A0%3A101%7Cm00070%3A496%3A129%7Cm00076%3A0%3A566%7Cm00070%3A1200%3A97%7Cm00077%3A0%3A654%7Cm00086%3A0%3A32%7Cm00077%3A752%3A1479%7Cm00087%3A0%3A119%7Cm00064%3A3200%3A122%7Cm00078%3A0%3A27%7Cm00071%3A3392%3A161%7Cm00079%3A0%3A15%7Cm00071%3A3568%3A152%7Cm00080%3A0%3A18%7Cm00071%3A3744%3A194%7Cm00052%3A9920%3A139%7Cm00081%3A0%3A1753%7Cm00072%3A1056%3A315%7Cm00082%3A0%3A63%7Cm00052%3A8016%3A137%7Cm00083%3A0%3A4153
-m01480%3A0%3A111%7Cm00070%3A112%3A124%7Cm01481%3A0%3A1124
+m01478%3A0%3A111%7Cm00070%3A112%3A124%7Cm01479%3A0%3A1124
 m00074%3A0%3A117%7Cm00795%3A0%3A883%7Cm00077%3A496%3A158%7Cm00796%3A0%3A239%7Cm00450%3A160%3A113%7Cm00797%3A0%3A696%7Cm00450%3A2832%3A121%7Cm00798%3A0%3A919
 m00074%3A0%3A316%7Cm00070%3A320%3A134%7Cm00075%3A0%3A101%7Cm00070%3A496%3A129%7Cm00076%3A0%3A566%7Cm00070%3A1200%3A97%7Cm00077%3A0%3A2564%7Cm00064%3A3200%3A122%7Cm00078%3A0%3A27%7Cm00071%3A3392%3A161%7Cm00079%3A0%3A15%7Cm00071%3A3568%3A152%7Cm00080%3A0%3A18%7Cm00071%3A3744%3A194%7Cm00052%3A9920%3A139%7Cm00081%3A0%3A1753%7Cm00072%3A1056%3A315%7Cm00082%3A0%3A63%7Cm00052%3A8016%3A137%7Cm00083%3A0%3A4155
 m00666%3A0%3A164%7Cm00637%3A272%3A2054%7Cm00101%3A304%3A114%7Cm00638%3A0%3A19%7Cm00071%3A864%3A107%7Cm00639%3A0%3A91%7Cm00071%3A3776%3A162%7Cm00640%3A0%3A1144
@@ -6164,8 +6827,8 @@ m00645%3A0%3A3933
 m00063%3A0%3A157%7Cm00723%3A0%3A616%7Cm00495%3A592%3A153%7Cm00724%3A0%3A875%7Cm00495%3A2592%3A102%7Cm00725%3A0%3A9%7Cm00495%3A2848%3A125%7Cm00726%3A0%3A515%7Cm00724%3A432%3A111%7Cm00727%3A0%3A706%7Cm00495%3A4496%3A175%7Cm00728%3A0%3A95
 m00070%3A0%3A262%7Cm00097%3A0%3A68%7Cm00070%3A320%3A182%7Cm00098%3A0%3A968%7Cm00070%3A1680%3A107%7Cm00099%3A0%3A225%7Cm00066%3A6256%3A124%7Cm00100%3A0%3A171%7Cm00071%3A592%3A153%7Cm00101%3A0%3A4258%7Cm00072%3A1056%3A314%7Cm00102%3A0%3A1058%7Cm00072%3A2064%3A145%7Cm00103%3A0%3A603%7Cm00072%3A2688%3A192%7Cm00104%3A0%3A1526
 m00729%3A0%3A326%7Cm00732%3A0%3A5%7Cm00729%3A416%3A716%7Cm00054%3A5040%3A162%7Cm00730%3A0%3A230%7Cm00733%3A0%3A37%7Cm00730%3A224%3A321%7Cm00734%3A0%3A46%7Cm00730%3A560%3A109%7Cm00108%3A240%3A96%7Cm00731%3A0%3A465%7Cm00735%3A0%3A16%7Cm00731%3A480%3A479%7Cm00736%3A0%3A12%7Cm00731%3A976%3A111%7Cm00736%3A0%3A12%7Cm00731%3A1104%3A468%7Cm00096%3A0%3A2
-m01104%3A0%3A2399
-m01309%3A0%3A48%7Cm01298%3A48%3A255%7Cm01310%3A0%3A15%7Cm01298%3A320%3A355%7Cm01311%3A0%3A12%7Cm01298%3A704%3A464%7Cm01312%3A0%3A77%7Cm00331%3A1424%3A230%7Cm01299%3A0%3A316%7Cm00096%3A0%3A2
+m01102%3A0%3A2399
+m01307%3A0%3A48%7Cm01296%3A48%3A255%7Cm01308%3A0%3A15%7Cm01296%3A320%3A355%7Cm01309%3A0%3A12%7Cm01296%3A704%3A464%7Cm01310%3A0%3A77%7Cm00331%3A1424%3A230%7Cm01297%3A0%3A316%7Cm00096%3A0%3A2
 m00055%3A0%3A104%7Cm00783%3A0%3A3081%7Cm00386%3A32%3A113%7Cm00784%3A0%3A23
 m00320%3A0%3A7215
 m00509%3A0%3A456%7Cm00469%3A128%3A143%7Cm00510%3A0%3A2570%7Cm00169%3A4704%3A97%7Cm00331%3A0%3A101%7Cm00511%3A0%3A1261
@@ -6176,41 +6839,41 @@ m00164%3A0%3A114%7Cm00713%3A0%3A12%7Cm00543%3A128%3A104%7Cm00714%3A0%3A98%7Cm005
 m00055%3A0%3A104%7Cm00475%3A0%3A4907
 m00903%3A0%3A157%7Cm00646%3A128%3A145%7Cm00904%3A0%3A647%7Cm00740%3A784%3A314%7Cm00905%3A0%3A1222%7Cm00740%3A2544%3A111%7Cm00906%3A0%3A359
 m00067%3A0%3A82%7Cm00054%3A96%3A198%7Cm00068%3A0%3A3306%7Cm00054%3A4768%3A97%7Cm00069%3A0%3A8253
-m00182%3A0%3A101%7Cm01307%3A0%3A301%7Cm00993%3A208%3A101%7Cm01308%3A0%3A1278
-m01587%3A0%3A1182
+m00182%3A0%3A101%7Cm01305%3A0%3A301%7Cm00993%3A208%3A101%7Cm01306%3A0%3A1278
+m01585%3A0%3A1182
 m00085%3A0%3A10933
 m00346%3A0%3A115%7Cm00220%3A80%3A111%7Cm00347%3A0%3A624%7Cm00003%3A2080%3A115%7Cm00348%3A0%3A3%7Cm00003%3A2208%3A282%7Cm00349%3A0%3A114%7Cm00003%3A2624%3A116%7Cm00350%3A0%3A4923
-m00001%3A0%3A25909
+m00002%3A0%3A25909
 m00134%3A0%3A74%7Cm00065%3A80%3A102%7Cm00135%3A0%3A1670%7Cm00065%3A1600%3A132%7Cm00136%3A0%3A264%7Cm00065%3A3360%3A184%7Cm00137%3A0%3A709%7Cm00065%3A4464%3A137%7Cm00138%3A0%3A6021
 m00351%3A0%3A6384
 m00517%3A0%3A4567
 m00004%3A0%3A564%7Cm00003%3A624%3A139%7Cm00005%3A0%3A4%7Cm00003%3A768%3A115%7Cm00006%3A0%3A75%7Cm00003%3A960%3A115%7Cm00007%3A0%3A137%7Cm00003%3A1216%3A138%7Cm00008%3A0%3A414%7Cm00003%3A1776%3A129%7Cm00009%3A0%3A155%7Cm00003%3A2064%3A131%7Cm00010%3A0%3A12%7Cm00003%3A2208%3A282%7Cm00011%3A0%3A5%7Cm00003%3A2496%3A111%7Cm00003%3A2608%3A132%7Cm00012%3A0%3A41%7Cm00003%3A2784%3A356%7Cm00013%3A0%3A10%7Cm00003%3A3152%3A120%7Cm00014%3A0%3A7%7Cm00003%3A3280%3A180%7Cm00015%3A0%3A58%7Cm00003%3A3520%3A132%7Cm00016%3A0%3A11%7Cm00003%3A3664%3A107%7Cm00005%3A0%3A4%7Cm00003%3A3776%3A227%7Cm00017%3A0%3A200%7Cm00003%3A4208%3A104%7Cm00018%3A0%3A38%7Cm00003%3A4352%3A169%7Cm00019%3A0%3A6%7Cm00003%3A4528%3A169%7Cm00020%3A0%3A290%7Cm00003%3A4992%3A134%7Cm00021%3A0%3A9%7Cm00003%3A5136%3A290%7Cm00022%3A0%3A12%7Cm00003%3A5440%3A233%7Cm00023%3A0%3A336%7Cm00003%3A6016%3A125%7Cm00024%3A0%3A128%7Cm00003%3A6272%3A115%7Cm00025%3A0%3A12%7Cm00003%3A6400%3A107%7Cm00026%3A0%3A19%7Cm00003%3A6528%3A149%7Cm00027%3A0%3A89%7Cm00003%3A6768%3A310%7Cm00021%3A0%3A9%7Cm00003%3A7088%3A204%7Cm00028%3A0%3A34%7Cm00003%3A7328%3A98%7Cm00029%3A0%3A186%7Cm00003%3A7616%3A191%7Cm00030%3A0%3A221%7Cm00003%3A8032%3A161%7Cm00031%3A0%3A109%7Cm00003%3A8304%3A260%7Cm00032%3A0%3A137%7Cm00003%3A8704%3A473%7Cm00033%3A0%3A37%7Cm00003%3A9216%3A118%7Cm00021%3A0%3A9%7Cm00003%3A9344%3A130%7Cm00034%3A0%3A13%7Cm00003%3A9488%3A142%7Cm00035%3A0%3A1%7Cm00003%3A9632%3A196%7Cm00036%3A0%3A11%7Cm00003%3A9840%3A223%7Cm00037%3A0%3A95%7Cm00003%3A10160%3A202%7Cm00011%3A0%3A5%7Cm00003%3A10368%3A119%7Cm00038%3A0%3A182%7Cm00003%3A10672%3A128%7Cm00039%3A0%3A15%7Cm00003%3A10816%3A158%7Cm00035%3A0%3A1%7Cm00003%3A10976%3A169%7Cm00040%3A0%3A52%7Cm00003%3A11200%3A216%7Cm00041%3A0%3A101%7Cm00003%3A11520%3A495%7Cm00042%3A0%3A15%7Cm00003%3A12032%3A192%7Cm00043%3A0%3A15%7Cm00003%3A12240%3A149%7Cm00044%3A0%3A10%7Cm00003%3A12400%3A182%7Cm00021%3A0%3A9%7Cm00003%3A12592%3A216%7Cm00045%3A0%3A86%7Cm00003%3A12896%3A376%7Cm00046%3A0%3A7%7Cm00003%3A13280%3A101%7Cm00044%3A0%3A10%7Cm00003%3A13392%3A121%7Cm00047%3A0%3A101%7Cm00003%3A13616%3A184%7Cm00046%3A0%3A7%7Cm00003%3A13808%3A177%7Cm00048%3A0%3A14%7Cm00003%3A14000%3A454%7Cm00021%3A0%3A9%7Cm00003%3A14464%3A157%7Cm00049%3A0%3A2%7Cm00003%3A14624%3A164%7Cm00016%3A0%3A11%7Cm00003%3A14800%3A148%7Cm00050%3A0%3A210%7Cm00003%3A15536%3A373%7Cm00051%3A0%3A41
 m00646%3A0%3A3928
-m00993%3A0%3A366%7Cm01498%3A0%3A962
+m00993%3A0%3A366%7Cm01496%3A0%3A962
 m00352%3A0%3A118%7Cm00695%3A0%3A3643
-m01045%3A0%3A13%7Cm00816%3A16%3A112%7Cm01767%3A0%3A50%7Cm01398%3A240%3A104%7Cm01768%3A0%3A357%7Cm01431%3A160%3A96%7Cm01769%3A0%3A200
+m01045%3A0%3A13%7Cm00816%3A16%3A112%7Cm01765%3A0%3A50%7Cm01396%3A240%3A104%7Cm01766%3A0%3A357%7Cm01429%3A160%3A96%7Cm01767%3A0%3A200
 m00908%3A0%3A109%7Cm00340%3A96%3A112%7Cm00945%3A0%3A2632
 m00352%3A0%3A118%7Cm00935%3A0%3A2767
-m01930%3A0%3A27%7Cm01665%3A32%3A104%7Cm01931%3A0%3A503
+m01928%3A0%3A27%7Cm01663%3A32%3A104%7Cm01929%3A0%3A503
 m00063%3A0%3A106%7Cm00241%3A0%3A224%7Cm00143%3A320%3A103%7Cm00242%3A0%3A7232%7Cm00056%3A10848%3A161
 m00425%3A0%3A1894%7Cm00065%3A1616%3A113%7Cm00426%3A0%3A767%7Cm00138%3A528%3A150%7Cm00427%3A0%3A2495
-m00933%3A0%3A97%7Cm01390%3A0%3A1216%7Cm01026%3A2272%3A126%7Cm01391%3A0%3A102
-m00352%3A0%3A108%7Cm01131%3A0%3A78%7Cm00062%3A2480%3A107%7Cm01132%3A0%3A41%7Cm00808%3A256%3A96%7Cm01133%3A0%3A367%7Cm01082%3A1760%3A98%7Cm01134%3A0%3A1363
+m00933%3A0%3A97%7Cm01388%3A0%3A1216%7Cm01026%3A2272%3A126%7Cm01389%3A0%3A102
+m00352%3A0%3A108%7Cm01129%3A0%3A78%7Cm00062%3A2480%3A107%7Cm01130%3A0%3A41%7Cm00808%3A256%3A96%7Cm01131%3A0%3A367%7Cm01080%3A1760%3A98%7Cm01132%3A0%3A1363
 m00668%3A0%3A551%7Cm00968%3A0%3A11%7Cm00670%3A16%3A428%7Cm00969%3A0%3A303%7Cm00670%3A1024%3A182%7Cm00970%3A0%3A70%7Cm00670%3A1264%3A210%7Cm00513%3A336%3A109%7Cm00671%3A0%3A17%7Cm00327%3A3648%3A126%7Cm00672%3A0%3A15%7Cm00327%3A3808%3A200%7Cm00673%3A0%3A531
-m01536%3A0%3A1287
-m00055%3A0%3A104%7Cm01239%3A0%3A74%7Cm00585%3A192%3A106%7Cm00062%3A7936%3A133%7Cm00693%3A0%3A100%7Cm00586%3A0%3A201%7Cm01240%3A0%3A196%7Cm01003%3A208%3A133%7Cm01241%3A0%3A451%7Cm01003%3A1360%3A102%7Cm01242%3A0%3A308
-m01513%3A0%3A106%7Cm01732%3A0%3A42%7Cm00993%3A208%3A97%7Cm01733%3A0%3A732
+m01534%3A0%3A1287
+m00055%3A0%3A104%7Cm01237%3A0%3A74%7Cm00585%3A192%3A106%7Cm00062%3A7936%3A133%7Cm00693%3A0%3A100%7Cm00586%3A0%3A201%7Cm01238%3A0%3A196%7Cm01003%3A208%3A133%7Cm01239%3A0%3A451%7Cm01003%3A1360%3A102%7Cm01240%3A0%3A308
+m01511%3A0%3A106%7Cm01730%3A0%3A42%7Cm00993%3A208%3A97%7Cm01731%3A0%3A732
 m00059%3A0%3A119%7Cm00369%3A0%3A6107
-m01774%3A0%3A124%7Cm01398%3A240%3A104%7Cm01775%3A0%3A701
-m00352%3A0%3A118%7Cm01124%3A0%3A506%7Cm00902%3A32%3A99%7Cm01125%3A0%3A812%7Cm00374%3A4256%3A163%7Cm01126%3A0%3A160%7Cm00655%3A2528%3A149%7Cm01127%3A0%3A290
-m00216%3A0%3A141%7Cm01315%3A0%3A1613
+m01772%3A0%3A124%7Cm01396%3A240%3A104%7Cm01773%3A0%3A701
+m00352%3A0%3A118%7Cm01122%3A0%3A506%7Cm00902%3A32%3A99%7Cm01123%3A0%3A812%7Cm00374%3A4256%3A163%7Cm01124%3A0%3A160%7Cm00655%3A2528%3A149%7Cm01125%3A0%3A290
+m00216%3A0%3A141%7Cm01313%3A0%3A1613
 m00353%3A0%3A117%7Cm00532%3A0%3A2925%7Cm00183%3A4912%3A116%7Cm00533%3A0%3A1260
-m01464%3A0%3A93%7Cm00646%3A128%3A123%7Cm01465%3A0%3A1180
-m01907%3A0%3A684
-m02060%3A0%3A72%7Cm01734%3A80%3A97%7Cm02061%3A0%3A199
+m01462%3A0%3A93%7Cm00646%3A128%3A123%7Cm01463%3A0%3A1180
+m01905%3A0%3A684
+m02058%3A0%3A72%7Cm01732%3A80%3A97%7Cm02059%3A0%3A199
 m00330%3A0%3A161%7Cm00333%3A0%3A6%7Cm00330%3A160%3A1837%7Cm00334%3A0%3A55%7Cm00330%3A2176%3A1821%7Cm00169%3A4704%3A97%7Cm00331%3A0%3A2612
 m00200%3A0%3A1969%7Cm00058%3A2576%3A147%7Cm00201%3A0%3A88%7Cm00058%3A2816%3A96%7Cm00202%3A0%3A197%7Cm00058%3A3184%3A326%7Cm00203%3A0%3A11%7Cm00055%3A1744%3A96%7Cm00204%3A0%3A23%7Cm00054%3A5040%3A100%7Cm00205%3A0%3A283%7Cm00058%3A3904%3A159%7Cm00206%3A0%3A5%7Cm00058%3A4096%3A139%7Cm00207%3A0%3A1%7Cm00058%3A4256%3A164%7Cm00208%3A0%3A284%7Cm00058%3A4720%3A152%7Cm00209%3A0%3A664%7Cm00058%3A8784%3A154%7Cm00210%3A0%3A1091%7Cm00058%3A10336%3A190%7Cm00211%3A0%3A5%7Cm00058%3A10640%3A149%7Cm00212%3A0%3A8%7Cm00058%3A10816%3A99%7Cm00213%3A0%3A1517
-m01707%3A0%3A16%7Cm00668%3A64%3A188%7Cm01727%3A0%3A344%7Cm00003%3A2640%3A100%7Cm01728%3A0%3A338
+m01705%3A0%3A16%7Cm00668%3A64%3A188%7Cm01725%3A0%3A344%7Cm00003%3A2640%3A100%7Cm01726%3A0%3A338
 m00053%3A0%3A613%7Cm00093%3A0%3A98%7Cm00053%3A656%3A4079%7Cm00094%3A0%3A371%7Cm00053%3A4832%3A2226%7Cm00095%3A0%3A111%7Cm00053%3A10400%3A3109%7Cm00096%3A0%3A2
 m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm00867%3A0%3A304%7Cm00003%3A2640%3A100%7Cm00221%3A0%3A7%7Cm00618%3A256%3A249%7Cm00868%3A0%3A2222
 m00637%3A0%3A2326%7Cm00101%3A304%3A114%7Cm00638%3A0%3A19%7Cm00071%3A864%3A107%7Cm00639%3A0%3A91%7Cm00071%3A3776%3A162%7Cm00640%3A0%3A1146
@@ -6219,460 +6882,460 @@ m00399%3A0%3A69%7Cm00216%3A240%3A110%7Cm00512%3A0%3A195%7Cm00125%3A1152%3A100%7C
 m00402%3A0%3A17%7Cm00346%3A16%3A99%7Cm00403%3A0%3A32%7Cm00216%3A256%3A98%7Cm00404%3A0%3A238%7Cm00347%3A272%3A129%7Cm00405%3A0%3A97%7Cm00347%3A496%3A128%7Cm00003%3A2080%3A115%7Cm00348%3A0%3A3%7Cm00003%3A2208%3A282%7Cm00349%3A0%3A114%7Cm00003%3A2624%3A116%7Cm00406%3A0%3A17%7Cm00350%3A16%3A214%7Cm00407%3A0%3A11%7Cm00350%3A240%3A157%7Cm00408%3A0%3A581%7Cm00350%3A1824%3A188%7Cm00409%3A0%3A5%7Cm00350%3A2016%3A431%7Cm00410%3A0%3A164%7Cm00350%3A2608%3A223%7Cm00096%3A0%3A2%7Cm00350%3A2832%3A199%7Cm00411%3A0%3A10%7Cm00350%3A3040%3A99%7Cm00412%3A0%3A14%7Cm00350%3A3152%3A133%7Cm00413%3A0%3A12%7Cm00350%3A3296%3A232%7Cm00414%3A0%3A9%7Cm00350%3A3536%3A178%7Cm00415%3A0%3A15%7Cm00350%3A3728%3A241%7Cm00416%3A0%3A16%7Cm00350%3A3984%3A142%7Cm00417%3A0%3A3%7Cm00350%3A4128%3A313%7Cm00418%3A0%3A8%7Cm00350%3A4448%3A203%7Cm00419%3A0%3A6%7Cm00350%3A4656%3A229%7Cm00420%3A0%3A41
 m00330%3A0%3A3997%7Cm00169%3A4704%3A97%7Cm00331%3A0%3A2614
 m00520%3A0%3A76%7Cm00220%3A80%3A112%7Cm00521%3A0%3A375%7Cm00452%3A1056%3A200%7Cm00522%3A0%3A163%7Cm00452%3A784%3A103%7Cm00523%3A0%3A1338%7Cm00452%3A3328%3A158%7Cm00524%3A0%3A1967
-m01171%3A0%3A86%7Cm00220%3A80%3A112%7Cm00521%3A0%3A139%7Cm01172%3A0%3A33%7Cm00521%3A192%3A183%7Cm01173%3A0%3A1055%7Cm00524%3A848%3A101%7Cm01174%3A0%3A459
+m01169%3A0%3A86%7Cm00220%3A80%3A112%7Cm00521%3A0%3A139%7Cm01170%3A0%3A33%7Cm00521%3A192%3A183%7Cm01171%3A0%3A1055%7Cm00524%3A848%3A101%7Cm01172%3A0%3A459
 m00063%3A0%3A162%7Cm00106%3A0%3A1314%7Cm00063%3A4736%3A170%7Cm00107%3A0%3A2253%7Cm00063%3A5056%3A294%7Cm00108%3A0%3A374%7Cm00064%3A128%3A204%7Cm00109%3A0%3A18%7Cm00064%3A368%3A146%7Cm00110%3A0%3A134%7Cm00064%3A736%3A180%7Cm00111%3A0%3A1661%7Cm00064%3A3232%3A111%7Cm00112%3A0%3A3009
 m00507%3A0%3A125%7Cm00590%3A0%3A3428%7Cm00546%3A2144%3A115%7Cm00591%3A0%3A219%7Cm00519%3A2336%3A104%7Cm00592%3A0%3A219
-m01298%3A0%3A1260%7Cm00331%3A1424%3A230%7Cm01299%3A0%3A316
-m01083%3A0%3A75%7Cm00220%3A80%3A112%7Cm01084%3A0%3A1092%7Cm00376%3A352%3A96%7Cm01085%3A0%3A1097
-m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01740%3A0%3A277%7Cm01770%3A0%3A14%7Cm01740%3A320%3A465
-m01027%3A0%3A375%7Cm01086%3A0%3A262%7Cm00273%3A3152%3A122%7Cm01087%3A0%3A650%7Cm01028%3A256%3A109%7Cm01088%3A0%3A239%7Cm00464%3A1168%3A105%7Cm01089%3A0%3A378%7Cm00274%3A560%3A133%7Cm01090%3A0%3A94
-m00352%3A0%3A112%7Cm01546%3A0%3A822%7Cm00394%3A496%3A197%7Cm01547%3A0%3A126
-m01399%3A0%3A147%7Cm01865%3A0%3A625
-m01555%3A0%3A125%7Cm01013%3A1344%3A96%7Cm01556%3A0%3A1010
+m01296%3A0%3A1260%7Cm00331%3A1424%3A230%7Cm01297%3A0%3A316
+m01081%3A0%3A75%7Cm00220%3A80%3A112%7Cm01082%3A0%3A1092%7Cm00376%3A352%3A96%7Cm01083%3A0%3A1097
+m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01738%3A0%3A277%7Cm01768%3A0%3A14%7Cm01738%3A320%3A465
+m01027%3A0%3A375%7Cm01084%3A0%3A262%7Cm00273%3A3152%3A122%7Cm01085%3A0%3A650%7Cm01028%3A256%3A109%7Cm01086%3A0%3A239%7Cm00464%3A1168%3A105%7Cm01087%3A0%3A378%7Cm00274%3A560%3A133%7Cm01088%3A0%3A94
+m00352%3A0%3A112%7Cm01544%3A0%3A822%7Cm00394%3A496%3A197%7Cm01545%3A0%3A126
+m01397%3A0%3A147%7Cm01863%3A0%3A625
+m01553%3A0%3A125%7Cm01013%3A1344%3A96%7Cm01554%3A0%3A1010
 m00003%3A0%3A15953
-m01220%3A0%3A120%7Cm01484%3A0%3A858%7Cm00394%3A496%3A155%7Cm01485%3A0%3A216
-m01135%3A0%3A1108%7Cm00774%3A848%3A128%7Cm01136%3A0%3A387%7Cm00774%3A848%3A118%7Cm01137%3A0%3A514
+m01218%3A0%3A120%7Cm01482%3A0%3A858%7Cm00394%3A496%3A155%7Cm01483%3A0%3A216
+m01133%3A0%3A1108%7Cm00774%3A848%3A128%7Cm01134%3A0%3A387%7Cm00774%3A848%3A118%7Cm01135%3A0%3A514
 m00962%3A0%3A414%7Cm00496%3A1552%3A116%7Cm00963%3A0%3A2052%7Cm00057%3A12400%3A98%7Cm00964%3A0%3A89
 m01044%3A0%3A2547
-m01507%3A0%3A46%7Cm00340%3A96%3A98%7Cm01508%3A0%3A13%7Cm00341%3A448%3A97%7Cm01509%3A0%3A1055
+m01505%3A0%3A46%7Cm00340%3A96%3A98%7Cm01506%3A0%3A13%7Cm00341%3A448%3A97%7Cm01507%3A0%3A1055
 m00654%3A0%3A108%7Cm00942%3A0%3A96%7Cm00654%3A400%3A125%7Cm00943%3A0%3A681%7Cm00352%3A2304%3A114%7Cm00944%3A0%3A1736
 m00766%3A0%3A1157%7Cm00663%3A320%3A115%7Cm00767%3A0%3A921%7Cm00663%3A544%3A114%7Cm00768%3A0%3A1176
-m01591%3A0%3A622%7Cm00062%3A4624%3A96%7Cm01592%3A0%3A450
-m00352%3A0%3A108%7Cm01145%3A0%3A288%7Cm00335%3A528%3A101%7Cm01146%3A0%3A1726
-m01329%3A0%3A517%7Cm00216%3A944%3A108%7Cm01330%3A0%3A1092
+m01589%3A0%3A622%7Cm00062%3A4624%3A96%7Cm01590%3A0%3A450
+m00352%3A0%3A108%7Cm01143%3A0%3A288%7Cm00335%3A528%3A101%7Cm01144%3A0%3A1726
+m01327%3A0%3A517%7Cm00216%3A944%3A108%7Cm01328%3A0%3A1092
 m00927%3A0%3A890%7Cm00770%3A768%3A151%7Cm00928%3A0%3A261%7Cm00169%3A4704%3A97%7Cm00331%3A0%3A103%7Cm00929%3A0%3A205%7Cm00771%3A224%3A151%7Cm00930%3A0%3A1079
-m01404%3A0%3A630%7Cm00774%3A1344%3A133%7Cm01405%3A0%3A769
+m01402%3A0%3A630%7Cm00774%3A1344%3A133%7Cm01403%3A0%3A769
 m00164%3A0%3A118%7Cm00496%3A0%3A3149%7Cm00003%3A2640%3A100%7Cm00497%3A0%3A1299%7Cm00053%3A1424%3A108%7Cm00498%3A0%3A98
-m01751%3A0%3A79%7Cm01268%3A32%3A103%7Cm01752%3A0%3A768
-m01576%3A0%3A1200
+m01749%3A0%3A79%7Cm01266%3A32%3A103%7Cm01750%3A0%3A768
+m01574%3A0%3A1200
 m01035%3A0%3A30%7Cm00216%3A240%3A110%7Cm00773%3A0%3A130%7Cm01036%3A0%3A2289
 m00769%3A0%3A172%7Cm00470%3A1360%3A121%7Cm00770%3A0%3A1103%7Cm00169%3A4704%3A97%7Cm00331%3A0%3A103%7Cm00771%3A0%3A1836
-m00352%3A0%3A108%7Cm01436%3A0%3A1342
-m01831%3A0%3A32%7Cm01826%3A32%3A184%7Cm01832%3A0%3A608
-m01202%3A0%3A174%7Cm00782%3A176%3A101%7Cm01203%3A0%3A1728
-m00125%3A0%3A170%7Cm01838%3A0%3A643
-m00616%3A0%3A67%7Cm00220%3A80%3A145%7Cm01250%3A0%3A162%7Cm00868%3A144%3A111%7Cm01251%3A0%3A159%7Cm00003%3A2640%3A100%7Cm01252%3A0%3A1156
+m00352%3A0%3A108%7Cm01434%3A0%3A1342
+m01829%3A0%3A32%7Cm01824%3A32%3A184%7Cm01830%3A0%3A608
+m01200%3A0%3A174%7Cm00782%3A176%3A101%7Cm01201%3A0%3A1728
+m00125%3A0%3A170%7Cm01836%3A0%3A643
+m00616%3A0%3A67%7Cm00220%3A80%3A145%7Cm01248%3A0%3A162%7Cm00868%3A144%3A111%7Cm01249%3A0%3A159%7Cm00003%3A2640%3A100%7Cm01250%3A0%3A1156
 m00055%3A0%3A104%7Cm00336%3A0%3A519%7Cm00237%3A384%3A131%7Cm00337%3A0%3A31%7Cm00237%3A560%3A170%7Cm00338%3A0%3A1685%7Cm00063%3A4736%3A101%7Cm00339%3A0%3A3625%7Cm00056%3A10864%3A145
 m00271%3A0%3A185%7Cm00440%3A0%3A431%7Cm00285%3A640%3A167%7Cm00441%3A0%3A1554%7Cm00285%3A2128%3A493%7Cm00442%3A0%3A19%7Cm00285%3A2640%3A105%7Cm00443%3A0%3A965%7Cm00289%3A1280%3A110%7Cm00444%3A0%3A95%7Cm00215%3A7280%3A120%7Cm00445%3A0%3A1157
 m00215%3A0%3A8102
 m00059%3A0%3A119%7Cm00387%3A0%3A239%7Cm00073%3A256%3A259%7Cm00388%3A0%3A5193
 m00271%3A0%3A185%7Cm00604%3A0%3A150%7Cm00440%3A160%3A99%7Cm00605%3A0%3A201%7Cm00285%3A640%3A167%7Cm00606%3A0%3A168%7Cm00455%3A192%3A128%7Cm00607%3A0%3A50%7Cm00455%3A352%3A135%7Cm00608%3A0%3A25%7Cm00455%3A512%3A116%7Cm00609%3A0%3A86%7Cm00455%3A720%3A214%7Cm00610%3A0%3A45%7Cm00285%3A3200%3A125%7Cm00611%3A0%3A184%7Cm00215%3A4464%3A113%7Cm00286%3A0%3A293%7Cm00612%3A0%3A486%7Cm00459%3A816%3A185%7Cm00613%3A0%3A955
-m00271%3A0%3A185%7Cm01537%3A0%3A1085
+m00271%3A0%3A185%7Cm01535%3A0%3A1085
 m00284%3A0%3A18%7Cm00271%3A16%3A170%7Cm00285%3A0%3A3539%7Cm00215%3A4464%3A231%7Cm00286%3A0%3A431%7Cm00215%3A5056%3A233%7Cm00287%3A0%3A270%7Cm00215%3A5472%3A238%7Cm00288%3A0%3A240%7Cm00215%3A4576%3A104%7Cm00289%3A0%3A1456%7Cm00215%3A7280%3A120%7Cm00290%3A0%3A512
 m00271%3A0%3A185%7Cm00737%3A0%3A3420
-m01334%3A0%3A102%7Cm01504%3A0%3A14%7Cm01380%3A16%3A110%7Cm01505%3A0%3A1086
-m00352%3A0%3A118%7Cm01211%3A0%3A1428%7Cm00394%3A496%3A156%7Cm01212%3A0%3A289
-m00352%3A0%3A118%7Cm01211%3A0%3A112%7Cm01366%3A0%3A163%7Cm01211%3A368%3A101%7Cm01367%3A0%3A19%7Cm01211%3A480%3A122%7Cm01368%3A0%3A12%7Cm01144%3A1216%3A105%7Cm01369%3A0%3A514%7Cm00394%3A496%3A197%7Cm01370%3A0%3A143
-m01779%3A0%3A158%7Cm00543%3A160%3A108%7Cm01780%3A0%3A645
+m01332%3A0%3A102%7Cm01502%3A0%3A14%7Cm01378%3A16%3A110%7Cm01503%3A0%3A1086
+m00352%3A0%3A118%7Cm01209%3A0%3A1428%7Cm00394%3A496%3A156%7Cm01210%3A0%3A289
+m00352%3A0%3A118%7Cm01209%3A0%3A112%7Cm01364%3A0%3A163%7Cm01209%3A368%3A101%7Cm01365%3A0%3A19%7Cm01209%3A480%3A122%7Cm01366%3A0%3A12%7Cm01142%3A1216%3A105%7Cm01367%3A0%3A514%7Cm00394%3A496%3A197%7Cm01368%3A0%3A143
+m01777%3A0%3A158%7Cm00543%3A160%3A108%7Cm01778%3A0%3A645
 m00779%3A0%3A3405
 m00997%3A0%3A162%7Cm00532%3A32%3A124%7Cm00998%3A0%3A2390
-m00875%3A0%3A19%7Cm00682%3A16%3A129%7Cm01585%3A0%3A527%7Cm00057%3A8528%3A100%7Cm01586%3A0%3A409
+m00875%3A0%3A19%7Cm00682%3A16%3A129%7Cm01583%3A0%3A527%7Cm00057%3A8528%3A100%7Cm01584%3A0%3A409
 m00933%3A0%3A248%7Cm00764%3A176%3A102%7Cm00934%3A0%3A2561
-m00933%3A0%3A97%7Cm01092%3A0%3A504%7Cm00972%3A432%3A106%7Cm01093%3A0%3A1744
-m01910%3A0%3A232%7Cm00646%3A416%3A102%7Cm01911%3A0%3A346
-m01785%3A0%3A105%7Cm01398%3A192%3A151%7Cm01786%3A0%3A651
+m00933%3A0%3A97%7Cm01090%3A0%3A504%7Cm00972%3A432%3A106%7Cm01091%3A0%3A1744
+m01908%3A0%3A232%7Cm00646%3A416%3A102%7Cm01909%3A0%3A346
+m01783%3A0%3A105%7Cm01396%3A192%3A151%7Cm01784%3A0%3A651
 m00055%3A0%3A104%7Cm00377%3A0%3A3381%7Cm00064%3A3056%3A111%7Cm00378%3A0%3A2406
 m00352%3A0%3A118%7Cm00936%3A0%3A13%7Cm00808%3A464%3A120%7Cm00937%3A0%3A115%7Cm00831%3A48%3A140%7Cm00938%3A0%3A6%7Cm00831%3A192%3A102%7Cm00939%3A0%3A2248
 m00774%3A0%3A1484%7Cm00747%3A752%3A102%7Cm00775%3A0%3A1825
-m00352%3A0%3A118%7Cm01253%3A0%3A192%7Cm00831%3A192%3A109%7Cm01254%3A0%3A507%7Cm01221%3A944%3A126%7Cm01255%3A0%3A847
-m00352%3A0%3A118%7Cm01144%3A0%3A170%7Cm01493%3A0%3A41%7Cm00831%3A192%3A113%7Cm01494%3A0%3A891
-m00352%3A0%3A108%7Cm01302%3A0%3A106%7Cm00335%3A528%3A110%7Cm01303%3A0%3A1464
-m02009%3A0%3A484
-m01609%3A0%3A97%7Cm01298%3A80%3A96%7Cm01610%3A0%3A949
-m01820%3A0%3A629%7Cm01105%3A704%3A122%7Cm01821%3A0%3A100
-m01643%3A0%3A1097
-m00320%3A0%3A112%7Cm01109%3A0%3A2235
+m00352%3A0%3A118%7Cm01251%3A0%3A192%7Cm00831%3A192%3A109%7Cm01252%3A0%3A507%7Cm01219%3A944%3A126%7Cm01253%3A0%3A847
+m00352%3A0%3A118%7Cm01142%3A0%3A170%7Cm01491%3A0%3A41%7Cm00831%3A192%3A113%7Cm01492%3A0%3A891
+m00352%3A0%3A108%7Cm01300%3A0%3A106%7Cm00335%3A528%3A110%7Cm01301%3A0%3A1464
+m02007%3A0%3A484
+m01607%3A0%3A97%7Cm01296%3A80%3A96%7Cm01608%3A0%3A949
+m01818%3A0%3A629%7Cm01103%3A704%3A122%7Cm01819%3A0%3A100
+m01641%3A0%3A1097
+m00320%3A0%3A112%7Cm01107%3A0%3A2235
 m00055%3A0%3A104%7Cm00236%3A0%3A314%7Cm00143%3A320%3A103%7Cm00237%3A0%3A3283%7Cm00056%3A7424%3A108%7Cm00238%3A0%3A3798%7Cm00056%3A10848%3A161
-m01975%3A0%3A82%7Cm01909%3A80%3A114%7Cm01976%3A0%3A369
-m00682%3A0%3A137%7Cm01261%3A0%3A1075%7Cm01204%3A656%3A106%7Cm01262%3A0%3A565
-m01557%3A0%3A192%7Cm00001%3A14448%3A255%7Cm01558%3A0%3A781
-m01611%3A0%3A428%7Cm01223%3A1056%3A118%7Cm01612%3A0%3A590
-m01870%3A0%3A88%7Cm01201%3A624%3A102%7Cm01871%3A0%3A581
-m01499%3A0%3A1325
-m01884%3A0%3A727
-m00352%3A0%3A118%7Cm01589%3A0%3A107%7Cm00902%3A32%3A99%7Cm01590%3A0%3A849
-m01743%3A0%3A455%7Cm01013%3A352%3A100%7Cm01744%3A0%3A404
-m01430%3A0%3A1026%7Cm01398%3A240%3A103%7Cm01431%3A0%3A328
-m01877%3A0%3A753
-m01873%3A0%3A763
-m01822%3A0%3A849
-m01958%3A0%3A139%7Cm01601%3A0%3A103%7Cm01959%3A0%3A355
-m01395%3A0%3A66%7Cm01056%3A80%3A151%7Cm01396%3A0%3A14%7Cm01056%3A320%3A137%7Cm01397%3A0%3A1170
-m02017%3A0%3A34%7Cm01990%3A208%3A113%7Cm02018%3A0%3A305
-m01938%3A0%3A93%7Cm00774%3A144%3A100%7Cm01939%3A0%3A439
-m02023%3A0%3A444
-m01790%3A0%3A900
-m00283%3A0%3A113%7Cm01094%3A0%3A2328
-m01486%3A0%3A15%7Cm01298%3A64%3A109%7Cm02003%3A0%3A111%7Cm02015%3A0%3A230
-m02002%3A0%3A82%7Cm01361%3A144%3A97%7Cm02003%3A0%3A318
-m02077%3A0%3A259
-m01360%3A0%3A99%7Cm01693%3A0%3A929
-m00696%3A0%3A246%7Cm01548%3A0%3A871%7Cm00053%3A1424%3A108%7Cm01549%3A0%3A32
-m01776%3A0%3A47%7Cm01298%3A48%3A125%7Cm01830%3A0%3A653
-m01827%3A0%3A77%7Cm01361%3A144%3A103%7Cm01985%3A0%3A368
-m00662%3A0%3A15%7Cm00074%3A16%3A101%7Cm00446%3A0%3A117%7Cm00070%3A320%3A98%7Cm01854%3A0%3A459
-m01788%3A0%3A55%7Cm01348%3A48%3A117%7Cm01789%3A0%3A734
-m01663%3A0%3A103%7Cm01348%3A48%3A109%7Cm01664%3A0%3A844
-m01670%3A0%3A207%7Cm01664%3A0%3A842
-m01559%3A0%3A495%7Cm01013%3A352%3A100%7Cm01560%3A0%3A630
-m01788%3A0%3A55%7Cm01348%3A48%3A109%7Cm01988%3A0%3A367
-m01946%3A0%3A217%7Cm01013%3A80%3A107%7Cm01947%3A0%3A105%7Cm01575%3A464%3A96%7Cm01948%3A0%3A91
-m02026%3A0%3A440
-m00666%3A0%3A135%7Cm02014%3A0%3A334
-m01361%3A0%3A106%7Cm02010%3A0%3A371
-m01944%3A0%3A41%7Cm01715%3A48%3A124%7Cm01945%3A0%3A222%7Cm01898%3A336%3A236
-m01866%3A0%3A48%7Cm01811%3A48%3A114%7Cm01867%3A0%3A186%7Cm01723%3A576%3A188%7Cm01868%3A0%3A76%7Cm01723%3A832%3A133%7Cm01869%3A0%3A27
-m01723%3A0%3A993
-m01831%3A0%3A32%7Cm01743%3A32%3A133%7Cm01919%3A0%3A500
-m01695%3A0%3A1023
-m01737%3A0%3A972
-m01415%3A0%3A962%7Cm01373%3A16%3A99%7Cm01416%3A0%3A128%7Cm01013%3A736%3A116%7Cm01417%3A0%3A198
+m01973%3A0%3A82%7Cm01907%3A80%3A114%7Cm01974%3A0%3A369
+m00682%3A0%3A137%7Cm01259%3A0%3A1075%7Cm01202%3A656%3A106%7Cm01260%3A0%3A565
+m01555%3A0%3A192%7Cm00002%3A14448%3A255%7Cm01556%3A0%3A781
+m01609%3A0%3A428%7Cm01221%3A1056%3A118%7Cm01610%3A0%3A590
+m01868%3A0%3A88%7Cm01199%3A624%3A102%7Cm01869%3A0%3A581
+m01497%3A0%3A1325
+m01882%3A0%3A727
+m00352%3A0%3A118%7Cm01587%3A0%3A107%7Cm00902%3A32%3A99%7Cm01588%3A0%3A849
+m01741%3A0%3A455%7Cm01013%3A352%3A100%7Cm01742%3A0%3A404
+m01428%3A0%3A1026%7Cm01396%3A240%3A103%7Cm01429%3A0%3A328
+m01875%3A0%3A753
+m01871%3A0%3A763
+m01820%3A0%3A849
+m01956%3A0%3A139%7Cm01599%3A0%3A103%7Cm01957%3A0%3A355
+m01393%3A0%3A66%7Cm01054%3A80%3A151%7Cm01394%3A0%3A14%7Cm01054%3A320%3A137%7Cm01395%3A0%3A1170
+m02015%3A0%3A34%7Cm01988%3A208%3A113%7Cm02016%3A0%3A305
+m01936%3A0%3A93%7Cm00774%3A144%3A100%7Cm01937%3A0%3A439
+m02021%3A0%3A444
+m01788%3A0%3A900
+m00283%3A0%3A113%7Cm01092%3A0%3A2328
+m01484%3A0%3A15%7Cm01296%3A64%3A109%7Cm02001%3A0%3A111%7Cm02013%3A0%3A230
+m02000%3A0%3A82%7Cm01359%3A144%3A97%7Cm02001%3A0%3A318
+m02075%3A0%3A259
+m01358%3A0%3A99%7Cm01691%3A0%3A929
+m00696%3A0%3A246%7Cm01546%3A0%3A871%7Cm00053%3A1424%3A108%7Cm01547%3A0%3A32
+m01774%3A0%3A47%7Cm01296%3A48%3A125%7Cm01828%3A0%3A653
+m01825%3A0%3A77%7Cm01359%3A144%3A103%7Cm01983%3A0%3A368
+m00662%3A0%3A15%7Cm00074%3A16%3A101%7Cm00446%3A0%3A117%7Cm00070%3A320%3A98%7Cm01852%3A0%3A459
+m01786%3A0%3A55%7Cm01346%3A48%3A117%7Cm01787%3A0%3A734
+m01661%3A0%3A103%7Cm01346%3A48%3A109%7Cm01662%3A0%3A844
+m01668%3A0%3A207%7Cm01662%3A0%3A842
+m01557%3A0%3A495%7Cm01013%3A352%3A100%7Cm01558%3A0%3A630
+m01786%3A0%3A55%7Cm01346%3A48%3A109%7Cm01986%3A0%3A367
+m01944%3A0%3A217%7Cm01013%3A80%3A107%7Cm01945%3A0%3A105%7Cm01573%3A464%3A96%7Cm01946%3A0%3A91
+m02024%3A0%3A440
+m00666%3A0%3A135%7Cm02012%3A0%3A334
+m01359%3A0%3A106%7Cm02008%3A0%3A371
+m01942%3A0%3A41%7Cm01713%3A48%3A124%7Cm01943%3A0%3A222%7Cm01896%3A336%3A236
+m01864%3A0%3A48%7Cm01809%3A48%3A114%7Cm01865%3A0%3A186%7Cm01721%3A576%3A188%7Cm01866%3A0%3A76%7Cm01721%3A832%3A133%7Cm01867%3A0%3A27
+m01721%3A0%3A993
+m01829%3A0%3A32%7Cm01741%3A32%3A133%7Cm01917%3A0%3A500
+m01693%3A0%3A1023
+m01735%3A0%3A972
+m01413%3A0%3A962%7Cm01371%3A16%3A99%7Cm01414%3A0%3A128%7Cm01013%3A736%3A116%7Cm01415%3A0%3A198
 m00059%3A0%3A119%7Cm00907%3A0%3A2830
-m00243%3A0%3A132%7Cm01196%3A0%3A1893
-m00352%3A0%3A118%7Cm01589%3A0%3A107%7Cm00300%3A0%3A1%7Cm01213%3A112%3A97%7Cm01603%3A0%3A46%7Cm01590%3A64%3A518%7Cm01604%3A0%3A11%7Cm01590%3A592%3A257%7Cm00096%3A0%3A2
-m01831%3A0%3A32%7Cm01743%3A32%3A107%7Cm01902%3A0%3A557
-m01406%3A0%3A195%7Cm00369%3A640%3A115%7Cm01407%3A0%3A1209
-m01045%3A0%3A13%7Cm00816%3A16%3A112%7Cm01553%3A0%3A437%7Cm01270%3A1040%3A103%7Cm01554%3A0%3A567
-m01360%3A0%3A99%7Cm01580%3A0%3A287%7Cm01388%3A368%3A108%7Cm01581%3A0%3A343%7Cm00062%3A2480%3A99%7Cm01582%3A0%3A262
-m01550%3A0%3A466%7Cm01109%3A1216%3A108%7Cm01551%3A0%3A125%7Cm01388%3A384%3A126%7Cm01552%3A0%3A422
-m01309%3A0%3A48%7Cm01298%3A48%3A125%7Cm01620%3A0%3A69%7Cm01550%3A80%3A143%7Cm01621%3A0%3A743
-m01142%3A0%3A108%7Cm01271%3A0%3A535%7Cm01142%3A208%3A126%7Cm01272%3A0%3A1087
-m01565%3A0%3A89%7Cm00052%3A1424%3A97%7Cm01566%3A0%3A9%7Cm01550%3A192%3A117%7Cm01567%3A0%3A907
-m01364%3A0%3A1610
-m01667%3A0%3A179%7Cm01284%3A368%3A96%7Cm01668%3A0%3A17%7Cm01419%3A0%3A159%7Cm01669%3A0%3A602
-m01885%3A0%3A70%7Cm01734%3A80%3A100%7Cm01886%3A0%3A320%7Cm01755%3A416%3A103%7Cm01887%3A0%3A134
-m01909%3A0%3A681
-m01829%3A0%3A826
-m01851%3A0%3A72%7Cm00052%3A3504%3A99%7Cm01852%3A0%3A624
-m01972%3A0%3A296%7Cm01277%3A400%3A108%7Cm01973%3A0%3A169
-m01994%3A0%3A80%7Cm01876%3A80%3A100%7Cm01995%3A0%3A333
-m01949%3A0%3A90%7Cm01213%3A128%3A110%7Cm01950%3A0%3A412
-m01866%3A0%3A48%7Cm01829%3A48%3A109%7Cm01940%3A0%3A473
-m01906%3A0%3A690
-m01622%3A0%3A92%7Cm00902%3A32%3A99%7Cm01623%3A0%3A932
-m01488%3A0%3A1340
-m01371%3A0%3A1584
-m01256%3A0%3A1264%7Cm00590%3A3280%3A148%7Cm00546%3A2144%3A115%7Cm01041%3A0%3A17%7Cm00806%3A64%3A114%7Cm01257%3A0%3A30%7Cm00053%3A1424%3A108%7Cm01258%3A0%3A97
+m00243%3A0%3A132%7Cm01194%3A0%3A1893
+m00352%3A0%3A118%7Cm01587%3A0%3A107%7Cm00300%3A0%3A1%7Cm01211%3A112%3A97%7Cm01601%3A0%3A46%7Cm01588%3A64%3A518%7Cm01602%3A0%3A11%7Cm01588%3A592%3A257%7Cm00096%3A0%3A2
+m01829%3A0%3A32%7Cm01741%3A32%3A107%7Cm01900%3A0%3A557
+m01404%3A0%3A195%7Cm00369%3A640%3A115%7Cm01405%3A0%3A1209
+m01045%3A0%3A13%7Cm00816%3A16%3A112%7Cm01551%3A0%3A437%7Cm01268%3A1040%3A103%7Cm01552%3A0%3A567
+m01358%3A0%3A99%7Cm01578%3A0%3A287%7Cm01386%3A368%3A108%7Cm01579%3A0%3A343%7Cm00062%3A2480%3A99%7Cm01580%3A0%3A262
+m01548%3A0%3A466%7Cm01107%3A1216%3A108%7Cm01549%3A0%3A125%7Cm01386%3A384%3A126%7Cm01550%3A0%3A422
+m01307%3A0%3A48%7Cm01296%3A48%3A125%7Cm01618%3A0%3A69%7Cm01548%3A80%3A143%7Cm01619%3A0%3A743
+m01140%3A0%3A108%7Cm01269%3A0%3A535%7Cm01140%3A208%3A126%7Cm01270%3A0%3A1087
+m01563%3A0%3A89%7Cm00052%3A1424%3A97%7Cm01564%3A0%3A9%7Cm01548%3A192%3A117%7Cm01565%3A0%3A907
+m01362%3A0%3A1610
+m01665%3A0%3A179%7Cm01282%3A368%3A96%7Cm01666%3A0%3A17%7Cm01417%3A0%3A159%7Cm01667%3A0%3A602
+m01883%3A0%3A70%7Cm01732%3A80%3A100%7Cm01884%3A0%3A320%7Cm01753%3A416%3A103%7Cm01885%3A0%3A134
+m01907%3A0%3A681
+m01827%3A0%3A826
+m01849%3A0%3A72%7Cm00052%3A3504%3A99%7Cm01850%3A0%3A624
+m01970%3A0%3A296%7Cm01275%3A400%3A108%7Cm01971%3A0%3A169
+m01992%3A0%3A80%7Cm01874%3A80%3A100%7Cm01993%3A0%3A333
+m01947%3A0%3A90%7Cm01211%3A128%3A110%7Cm01948%3A0%3A412
+m01864%3A0%3A48%7Cm01827%3A48%3A109%7Cm01938%3A0%3A473
+m01904%3A0%3A690
+m01620%3A0%3A92%7Cm00902%3A32%3A99%7Cm01621%3A0%3A932
+m01486%3A0%3A1340
+m01369%3A0%3A1584
+m01254%3A0%3A1264%7Cm00590%3A3280%3A148%7Cm00546%3A2144%3A115%7Cm01041%3A0%3A17%7Cm00806%3A64%3A114%7Cm01255%3A0%3A30%7Cm00053%3A1424%3A108%7Cm01256%3A0%3A97
 m00164%3A0%3A124%7Cm01039%3A0%3A1804%7Cm00651%3A160%3A130%7Cm01040%3A0%3A6%7Cm00546%3A2144%3A115%7Cm01041%3A0%3A17%7Cm00806%3A64%3A114%7Cm01042%3A0%3A33%7Cm00053%3A1424%3A108%7Cm01043%3A0%3A99
-m01986%3A0%3A108%7Cm01550%3A224%3A97%7Cm01987%3A0%3A329
-m01569%3A0%3A583%7Cm01201%3A608%3A101%7Cm01570%3A0%3A525
-m02027%3A0%3A88%7Cm01201%3A624%3A109%7Cm02028%3A0%3A81%7Cm01169%3A1024%3A114%7Cm02029%3A0%3A44
-m01899%3A0%3A90%7Cm01201%3A624%3A107%7Cm01900%3A0%3A105%7Cm01169%3A1024%3A114%7Cm01901%3A0%3A283
-m01969%3A0%3A579
-m01443%3A0%3A275%7Cm01415%3A320%3A96%7Cm01444%3A0%3A1074
-m01781%3A0%3A502%7Cm01201%3A624%3A120%7Cm01782%3A0%3A1%7Cm01778%3A640%3A103%7Cm01783%3A0%3A185
-m02019%3A0%3A221%7Cm01881%3A48%3A111%7Cm02020%3A0%3A119
-m01532%3A0%3A457%7Cm01415%3A560%3A99%7Cm01533%3A0%3A52%7Cm01109%3A1328%3A237%7Cm01534%3A0%3A91%7Cm01109%3A1664%3A319%7Cm01535%3A0%3A34
-m01810%3A0%3A870
-m02034%3A0%3A29%7Cm01050%3A32%3A97%7Cm02035%3A0%3A296
-m01904%3A0%3A419%7Cm01664%3A352%3A97%7Cm01905%3A0%3A177
-m00833%3A0%3A27%7Cm00216%3A240%3A110%7Cm00467%3A0%3A124%7Cm01677%3A0%3A781
-m01807%3A0%3A144%7Cm01050%3A32%3A97%7Cm01808%3A0%3A636
-m01991%3A0%3A525
-m01629%3A0%3A551%7Cm01567%3A368%3A96%7Cm01630%3A0%3A472
-m01372%3A0%3A661%7Cm01013%3A304%3A120%7Cm01373%3A0%3A799
-m01876%3A0%3A761
-m01914%3A0%3A675
-m01989%3A0%3A531
-m01755%3A0%3A626%7Cm00834%3A2496%3A119%7Cm01756%3A0%3A199
-m01801%3A0%3A885
-m01584%3A0%3A1185
-m02039%3A0%3A403
-m01929%3A0%3A640
-m01055%3A0%3A2532
-m01878%3A0%3A77%7Cm01837%3A64%3A100%7Cm01879%3A0%3A573
-m02030%3A0%3A90%7Cm01201%3A624%3A102%7Cm02031%3A0%3A243
-m01705%3A0%3A101%7Cm01298%3A80%3A96%7Cm01706%3A0%3A805
-m00392%3A0%3A121%7Cm01736%3A0%3A853
-m01577%3A0%3A374%7Cm01569%3A384%3A182%7Cm01578%3A0%3A15%7Cm01201%3A608%3A97%7Cm01579%3A0%3A532
-m01795%3A0%3A156%7Cm01784%3A80%3A102%7Cm01796%3A0%3A638
-m01513%3A0%3A114%7Cm01791%3A0%3A21%7Cm00993%3A208%3A97%7Cm01792%3A0%3A82%7Cm01082%3A144%3A117%7Cm01793%3A0%3A468
-m01730%3A0%3A371%7Cm01623%3A176%3A145%7Cm01731%3A0%3A467
-m01360%3A0%3A99%7Cm01960%3A0%3A197%7Cm01664%3A352%3A97%7Cm01961%3A0%3A204
-m01745%3A0%3A99%7Cm01730%3A176%3A102%7Cm01746%3A0%3A754
-m01833%3A0%3A91%7Cm01388%3A16%3A104%7Cm01834%3A0%3A625
-m01814%3A0%3A332%7Cm01324%3A80%3A108%7Cm01815%3A0%3A422
-m01738%3A0%3A347%7Cm01039%3A688%3A122%7Cm01739%3A0%3A359%7Cm00053%3A1424%3A108%7Cm01234%3A0%3A31
-m01694%3A0%3A1024
-m01802%3A0%3A884
-m01861%3A0%3A780
-m01466%3A0%3A573%7Cm01316%3A592%3A128%7Cm01467%3A0%3A692
-m02024%3A0%3A41%7Cm01404%3A112%3A103%7Cm02025%3A0%3A299
-m02004%3A0%3A495
-m01513%3A0%3A106%7Cm01617%3A0%3A32%7Cm01568%3A112%3A125%7Cm01618%3A0%3A576%7Cm00374%3A816%3A123%7Cm01619%3A0%3A168
-m00352%3A0%3A112%7Cm01588%3A0%3A1064
-m01747%3A0%3A178%7Cm00831%3A80%3A108%7Cm01748%3A0%3A668
-m01513%3A0%3A113%7Cm01568%3A0%3A1103
-m01513%3A0%3A113%7Cm01880%3A0%3A30%7Cm01072%3A112%3A137%7Cm01881%3A0%3A465
-m01593%3A0%3A96%7Cm01398%3A240%3A104%7Cm01594%3A0%3A968
-m01707%3A0%3A16%7Cm01473%3A0%3A104%7Cm01708%3A0%3A882
-m00666%3A0%3A116%7Cm02065%3A0%3A243
-m01500%3A0%3A994%7Cm01388%3A368%3A108%7Cm01501%3A0%3A223
-m02006%3A0%3A98%7Cm01972%3A80%3A96%7Cm02007%3A0%3A299
-m01540%3A0%3A479%7Cm01109%3A1216%3A108%7Cm01109%3A1328%3A103%7Cm01541%3A0%3A322%7Cm01324%3A304%3A98%7Cm01542%3A0%3A11%7Cm01109%3A1872%3A112%7Cm01543%3A0%3A29
-m00055%3A0%3A104%7Cm01455%3A0%3A389%7Cm01284%3A352%3A112%7Cm01456%3A0%3A266%7Cm01223%3A1040%3A103%7Cm01457%3A0%3A270%7Cm00056%3A10864%3A118%7Cm01458%3A0%3A48
-m00631%3A0%3A102%7Cm01324%3A0%3A871%7Cm00054%3A3712%3A96%7Cm01325%3A0%3A110%7Cm01013%3A1344%3A96%7Cm01326%3A0%3A25%7Cm01013%3A64%3A127%7Cm01327%3A0%3A295
+m01984%3A0%3A108%7Cm01548%3A224%3A97%7Cm01985%3A0%3A329
+m01567%3A0%3A583%7Cm01199%3A608%3A101%7Cm01568%3A0%3A525
+m02025%3A0%3A88%7Cm01199%3A624%3A109%7Cm02026%3A0%3A81%7Cm01167%3A1024%3A114%7Cm02027%3A0%3A44
+m01897%3A0%3A90%7Cm01199%3A624%3A107%7Cm01898%3A0%3A105%7Cm01167%3A1024%3A114%7Cm01899%3A0%3A283
+m01967%3A0%3A579
+m01441%3A0%3A275%7Cm01413%3A320%3A96%7Cm01442%3A0%3A1074
+m01779%3A0%3A502%7Cm01199%3A624%3A120%7Cm01780%3A0%3A1%7Cm01776%3A640%3A103%7Cm01781%3A0%3A185
+m02017%3A0%3A221%7Cm01879%3A48%3A111%7Cm02018%3A0%3A119
+m01530%3A0%3A457%7Cm01413%3A560%3A99%7Cm01531%3A0%3A52%7Cm01107%3A1328%3A237%7Cm01532%3A0%3A91%7Cm01107%3A1664%3A319%7Cm01533%3A0%3A34
+m01808%3A0%3A870
+m02032%3A0%3A29%7Cm01050%3A32%3A97%7Cm02033%3A0%3A296
+m01902%3A0%3A419%7Cm01662%3A352%3A97%7Cm01903%3A0%3A177
+m00833%3A0%3A27%7Cm00216%3A240%3A110%7Cm00467%3A0%3A124%7Cm01675%3A0%3A781
+m01805%3A0%3A144%7Cm01050%3A32%3A97%7Cm01806%3A0%3A636
+m01989%3A0%3A525
+m01627%3A0%3A551%7Cm01565%3A368%3A96%7Cm01628%3A0%3A472
+m01370%3A0%3A661%7Cm01013%3A304%3A120%7Cm01371%3A0%3A799
+m01874%3A0%3A761
+m01912%3A0%3A675
+m01987%3A0%3A531
+m01753%3A0%3A626%7Cm00834%3A2496%3A119%7Cm01754%3A0%3A199
+m01799%3A0%3A885
+m01582%3A0%3A1185
+m02037%3A0%3A403
+m01927%3A0%3A640
+m01053%3A0%3A2532
+m01876%3A0%3A77%7Cm01835%3A64%3A100%7Cm01877%3A0%3A573
+m02028%3A0%3A90%7Cm01199%3A624%3A102%7Cm02029%3A0%3A243
+m01703%3A0%3A101%7Cm01296%3A80%3A96%7Cm01704%3A0%3A805
+m00392%3A0%3A121%7Cm01734%3A0%3A853
+m01575%3A0%3A374%7Cm01567%3A384%3A182%7Cm01576%3A0%3A15%7Cm01199%3A608%3A97%7Cm01577%3A0%3A532
+m01793%3A0%3A156%7Cm01782%3A80%3A102%7Cm01794%3A0%3A638
+m01511%3A0%3A114%7Cm01789%3A0%3A21%7Cm00993%3A208%3A97%7Cm01790%3A0%3A82%7Cm01080%3A144%3A117%7Cm01791%3A0%3A468
+m01728%3A0%3A371%7Cm01621%3A176%3A145%7Cm01729%3A0%3A467
+m01358%3A0%3A99%7Cm01958%3A0%3A197%7Cm01662%3A352%3A97%7Cm01959%3A0%3A204
+m01743%3A0%3A99%7Cm01728%3A176%3A102%7Cm01744%3A0%3A754
+m01831%3A0%3A91%7Cm01386%3A16%3A104%7Cm01832%3A0%3A625
+m01812%3A0%3A332%7Cm01322%3A80%3A108%7Cm01813%3A0%3A422
+m01736%3A0%3A347%7Cm01039%3A688%3A122%7Cm01737%3A0%3A359%7Cm00053%3A1424%3A108%7Cm01232%3A0%3A31
+m01692%3A0%3A1024
+m01800%3A0%3A884
+m01859%3A0%3A780
+m01464%3A0%3A573%7Cm01314%3A592%3A128%7Cm01465%3A0%3A692
+m02022%3A0%3A41%7Cm01402%3A112%3A103%7Cm02023%3A0%3A299
+m02002%3A0%3A495
+m01511%3A0%3A106%7Cm01615%3A0%3A32%7Cm01566%3A112%3A125%7Cm01616%3A0%3A576%7Cm00374%3A816%3A123%7Cm01617%3A0%3A168
+m00352%3A0%3A112%7Cm01586%3A0%3A1064
+m01745%3A0%3A178%7Cm00831%3A80%3A108%7Cm01746%3A0%3A668
+m01511%3A0%3A113%7Cm01566%3A0%3A1103
+m01511%3A0%3A113%7Cm01878%3A0%3A30%7Cm01070%3A112%3A137%7Cm01879%3A0%3A465
+m01591%3A0%3A96%7Cm01396%3A240%3A104%7Cm01592%3A0%3A968
+m01705%3A0%3A16%7Cm01471%3A0%3A104%7Cm01706%3A0%3A882
+m00666%3A0%3A116%7Cm02063%3A0%3A243
+m01498%3A0%3A994%7Cm01386%3A368%3A108%7Cm01499%3A0%3A223
+m02004%3A0%3A98%7Cm01970%3A80%3A96%7Cm02005%3A0%3A299
+m01538%3A0%3A479%7Cm01107%3A1216%3A108%7Cm01107%3A1328%3A103%7Cm01539%3A0%3A322%7Cm01322%3A304%3A98%7Cm01540%3A0%3A11%7Cm01107%3A1872%3A112%7Cm01541%3A0%3A29
+m00055%3A0%3A104%7Cm01453%3A0%3A389%7Cm01282%3A352%3A112%7Cm01454%3A0%3A266%7Cm01221%3A1040%3A103%7Cm01455%3A0%3A270%7Cm00056%3A10864%3A118%7Cm01456%3A0%3A48
+m00631%3A0%3A102%7Cm01322%3A0%3A871%7Cm00054%3A3712%3A96%7Cm01323%3A0%3A110%7Cm01013%3A1344%3A96%7Cm01324%3A0%3A25%7Cm01013%3A64%3A127%7Cm01325%3A0%3A295
 m00055%3A0%3A104%7Cm01012%3A0%3A49%7Cm00816%3A2144%3A110%7Cm01013%3A0%3A2163%7Cm00056%3A10864%3A120%7Cm01014%3A0%3A78
-m00271%3A0%3A130%7Cm01228%3A0%3A1607%7Cm00274%3A560%3A133%7Cm01229%3A0%3A46
-m00055%3A0%3A104%7Cm00395%3A0%3A101%7Cm01179%3A0%3A70%7Cm01013%3A1328%3A112%7Cm01180%3A0%3A1552%7Cm00056%3A10864%3A111%7Cm01181%3A0%3A77
-m01223%3A0%3A1181%7Cm01013%3A512%3A100%7Cm01224%3A0%3A388%7Cm00901%3A160%3A104%7Cm01225%3A0%3A171
-m01699%3A0%3A856%7Cm01407%3A592%3A116%7Cm01700%3A0%3A42
+m00271%3A0%3A130%7Cm01226%3A0%3A1607%7Cm00274%3A560%3A133%7Cm01227%3A0%3A46
+m00055%3A0%3A104%7Cm00395%3A0%3A101%7Cm01177%3A0%3A70%7Cm01013%3A1328%3A112%7Cm01178%3A0%3A1552%7Cm00056%3A10864%3A111%7Cm01179%3A0%3A77
+m01221%3A0%3A1181%7Cm01013%3A512%3A100%7Cm01222%3A0%3A388%7Cm00901%3A160%3A104%7Cm01223%3A0%3A171
+m01697%3A0%3A856%7Cm01405%3A592%3A116%7Cm01698%3A0%3A42
 m00059%3A0%3A119%7Cm01004%3A0%3A1378%7Cm00907%3A336%3A153%7Cm01005%3A0%3A985
-m00631%3A0%3A102%7Cm01450%3A0%3A716%7Cm01324%3A304%3A96%7Cm01451%3A0%3A368%7Cm01327%3A160%3A135
-m01259%3A0%3A1782%7Cm00388%3A5088%3A105
+m00631%3A0%3A102%7Cm01448%3A0%3A716%7Cm01322%3A304%3A96%7Cm01449%3A0%3A368%7Cm01325%3A160%3A135
+m01257%3A0%3A1782%7Cm00388%3A5088%3A105
 m00271%3A0%3A130%7Cm01037%3A0%3A2244%7Cm00901%3A160%3A104%7Cm01038%3A0%3A75
-m00055%3A0%3A104%7Cm00860%3A0%3A15%7Cm00816%3A2144%3A110%7Cm01268%3A0%3A458%7Cm01013%3A304%3A120%7Cm01269%3A0%3A886%7Cm00056%3A10864%3A137%7Cm00589%3A0%3A31
-m01516%3A0%3A96%7Cm01889%3A0%3A15%7Cm01013%3A1344%3A106%7Cm01890%3A0%3A505
-m00055%3A0%3A104%7Cm01283%3A0%3A59%7Cm00816%3A2144%3A110%7Cm01284%3A0%3A973%7Cm01269%3A512%3A98%7Cm01285%3A0%3A45%7Cm01269%3A656%3A205%7Cm01286%3A0%3A31%7Cm00056%3A10864%3A118%7Cm01287%3A0%3A78
-m01658%3A0%3A927%7Cm00056%3A10864%3A110%7Cm01389%3A0%3A22
-m01823%3A0%3A116%7Cm01658%3A128%3A127%7Cm01824%3A0%3A597
-m01193%3A0%3A598%7Cm01055%3A752%3A96%7Cm01194%3A0%3A3%7Cm00001%3A14544%3A159%7Cm01195%3A0%3A1177
-m02021%3A0%3A451
-m01872%3A0%3A766
-m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm01642%3A0%3A385%7Cm01729%3A0%3A25%7Cm01642%3A528%3A234%7Cm00096%3A0%3A2
-m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm01642%3A0%3A762
-m01831%3A0%3A32%7Cm01743%3A32%3A134%7Cm01923%3A0%3A337%7Cm01575%3A480%3A102%7Cm01924%3A0%3A49
-m01260%3A0%3A1887
-m01753%3A0%3A123%7Cm00902%3A80%3A110%7Cm01754%3A0%3A587%7Cm01746%3A624%3A98%7Cm01543%3A0%3A29
-m01990%3A0%3A528
-m01678%3A0%3A120%7Cm00220%3A96%3A96%7Cm01679%3A0%3A490%7Cm00834%3A2496%3A120%7Cm01680%3A0%3A213
-m01798%3A0%3A126%7Cm00220%3A96%3A96%7Cm01799%3A0%3A323%7Cm00834%3A2496%3A120%7Cm01800%3A0%3A221
-m01962%3A0%3A296%7Cm00834%3A2496%3A120%7Cm01963%3A0%3A176
-m01896%3A0%3A18%7Cm01050%3A32%3A97%7Cm01897%3A0%3A588
-m01979%3A0%3A560
-m01338%3A0%3A596%7Cm01316%3A592%3A100%7Cm01339%3A0%3A812%7Cm01316%3A1520%3A132%7Cm01340%3A0%3A38
-m01316%3A0%3A1751
-m01575%3A0%3A1203
-m01757%3A0%3A89%7Cm01595%3A16%3A99%7Cm01758%3A0%3A755
-m01142%3A0%3A1035%7Cm00907%3A336%3A96%7Cm01143%3A0%3A1114
-m01866%3A0%3A48%7Cm01884%3A48%3A114%7Cm01970%3A0%3A415
-m01486%3A0%3A15%7Cm00993%3A192%3A113%7Cm01487%3A0%3A1217
-m01657%3A0%3A1061
-m01459%3A0%3A1409
-m00682%3A0%3A145%7Cm01204%3A0%3A1328%7Cm00755%3A2512%3A101%7Cm01205%3A0%3A242%7Cm00464%3A1168%3A97%7Cm01206%3A0%3A90
-m01971%3A0%3A575
-m01764%3A0%3A111%7Cm01601%3A0%3A103%7Cm01765%3A0%3A253%7Cm01013%3A304%3A120%7Cm01766%3A0%3A350
-m01374%3A0%3A100%7Cm01954%3A0%3A504
-m01953%3A0%3A606
-m01374%3A0%3A706%7Cm01013%3A736%3A104%7Cm01375%3A0%3A760
+m00055%3A0%3A104%7Cm00860%3A0%3A15%7Cm00816%3A2144%3A110%7Cm01266%3A0%3A458%7Cm01013%3A304%3A120%7Cm01267%3A0%3A886%7Cm00056%3A10864%3A137%7Cm00589%3A0%3A31
+m01514%3A0%3A96%7Cm01887%3A0%3A15%7Cm01013%3A1344%3A106%7Cm01888%3A0%3A505
+m00055%3A0%3A104%7Cm01281%3A0%3A59%7Cm00816%3A2144%3A110%7Cm01282%3A0%3A973%7Cm01267%3A512%3A98%7Cm01283%3A0%3A45%7Cm01267%3A656%3A205%7Cm01284%3A0%3A31%7Cm00056%3A10864%3A118%7Cm01285%3A0%3A78
+m01656%3A0%3A927%7Cm00056%3A10864%3A110%7Cm01387%3A0%3A22
+m01821%3A0%3A116%7Cm01656%3A128%3A127%7Cm01822%3A0%3A597
+m01191%3A0%3A598%7Cm01053%3A752%3A96%7Cm01192%3A0%3A3%7Cm00002%3A14544%3A159%7Cm01193%3A0%3A1177
+m02019%3A0%3A451
+m01870%3A0%3A766
+m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm01640%3A0%3A385%7Cm01727%3A0%3A25%7Cm01640%3A528%3A234%7Cm00096%3A0%3A2
+m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm01640%3A0%3A762
+m01829%3A0%3A32%7Cm01741%3A32%3A134%7Cm01921%3A0%3A337%7Cm01573%3A480%3A102%7Cm01922%3A0%3A49
+m01258%3A0%3A1887
+m01751%3A0%3A123%7Cm00902%3A80%3A110%7Cm01752%3A0%3A587%7Cm01744%3A624%3A98%7Cm01541%3A0%3A29
+m01988%3A0%3A528
+m01676%3A0%3A120%7Cm00220%3A96%3A96%7Cm01677%3A0%3A490%7Cm00834%3A2496%3A120%7Cm01678%3A0%3A213
+m01796%3A0%3A126%7Cm00220%3A96%3A96%7Cm01797%3A0%3A323%7Cm00834%3A2496%3A120%7Cm01798%3A0%3A221
+m01960%3A0%3A296%7Cm00834%3A2496%3A120%7Cm01961%3A0%3A176
+m01894%3A0%3A18%7Cm01050%3A32%3A97%7Cm01895%3A0%3A588
+m01977%3A0%3A560
+m01336%3A0%3A596%7Cm01314%3A592%3A100%7Cm01337%3A0%3A812%7Cm01314%3A1520%3A132%7Cm01338%3A0%3A38
+m01314%3A0%3A1751
+m01573%3A0%3A1203
+m01755%3A0%3A89%7Cm01593%3A16%3A99%7Cm01756%3A0%3A755
+m01140%3A0%3A1035%7Cm00907%3A336%3A96%7Cm01141%3A0%3A1114
+m01864%3A0%3A48%7Cm01882%3A48%3A114%7Cm01968%3A0%3A415
+m01484%3A0%3A15%7Cm00993%3A192%3A113%7Cm01485%3A0%3A1217
+m01655%3A0%3A1061
+m01457%3A0%3A1409
+m00682%3A0%3A145%7Cm01202%3A0%3A1328%7Cm00755%3A2512%3A101%7Cm01203%3A0%3A242%7Cm00464%3A1168%3A97%7Cm01204%3A0%3A90
+m01969%3A0%3A575
+m01762%3A0%3A111%7Cm01599%3A0%3A103%7Cm01763%3A0%3A253%7Cm01013%3A304%3A120%7Cm01764%3A0%3A350
+m01372%3A0%3A100%7Cm01952%3A0%3A504
+m01951%3A0%3A606
+m01372%3A0%3A706%7Cm01013%3A736%3A104%7Cm01373%3A0%3A760
 m00379%3A0%3A166%7Cm00986%3A0%3A72%7Cm00647%3A288%3A120%7Cm00987%3A0%3A1312%7Cm00508%3A3232%3A99%7Cm00988%3A0%3A74%7Cm00508%3A3392%3A126%7Cm00989%3A0%3A157%7Cm00590%3A3296%3A132%7Cm00990%3A0%3A38%7Cm00508%3A3792%3A98%7Cm00991%3A0%3A72%7Cm00508%3A3952%3A129%7Cm00992%3A0%3A132
-m01276%3A0%3A1844
+m01274%3A0%3A1844
 m00667%3A0%3A3850
-m00933%3A0%3A122%7Cm01671%3A0%3A273%7Cm00090%3A144%3A97%7Cm01672%3A0%3A556
+m00933%3A0%3A122%7Cm01669%3A0%3A273%7Cm00090%3A144%3A97%7Cm01670%3A0%3A556
 m00379%3A0%3A166%7Cm00647%3A0%3A1251%7Cm00531%3A3024%3A108%7Cm00648%3A0%3A272%7Cm00283%3A3152%3A97%7Cm00649%3A0%3A946%7Cm00508%3A3232%3A99%7Cm00650%3A0%3A21%7Cm00508%3A3344%3A174%7Cm00651%3A0%3A332%7Cm00508%3A3792%3A98%7Cm00652%3A0%3A78%7Cm00508%3A3968%3A113%7Cm00653%3A0%3A169
-m01230%3A0%3A14%7Cm00507%3A16%3A109%7Cm01362%3A0%3A690%7Cm00698%3A112%3A103%7Cm01363%3A0%3A697
-m01665%3A0%3A1055
-m01627%3A0%3A478%7Cm00699%3A80%3A100%7Cm01628%3A0%3A405%7Cm00053%3A1424%3A108%7Cm01234%3A0%3A31
-m02053%3A0%3A30%7Cm00997%3A32%3A106%7Cm02054%3A0%3A7%7Cm00998%3A1664%3A96%7Cm02055%3A0%3A154
-m01891%3A0%3A711
-m00682%3A0%3A191%7Cm01502%3A0%3A958%7Cm00755%3A2512%3A101%7Cm01503%3A0%3A63
-m01647%3A0%3A1083
-m00933%3A0%3A97%7Cm01460%3A0%3A1311
-m01827%3A0%3A77%7Cm01361%3A144%3A96%7Cm01828%3A0%3A654
-m00666%3A0%3A128%7Cm01892%3A0%3A11%7Cm01828%3A80%3A572
-m01812%3A0%3A19%7Cm01398%3A240%3A104%7Cm01813%3A0%3A744
-m01597%3A0%3A107%7Cm01398%3A240%3A103%7Cm01598%3A0%3A45%7Cm01430%3A112%3A97%7Cm01599%3A0%3A814
-m00055%3A0%3A104%7Cm01845%3A0%3A696
-m01844%3A0%3A801
-m01696%3A0%3A615%7Cm00698%3A112%3A102%7Cm01697%3A0%3A306
-m01230%3A0%3A14%7Cm01026%3A16%3A110%7Cm01656%3A0%3A942
-m01982%3A0%3A78%7Cm01778%3A640%3A98%7Cm01983%3A0%3A201%7Cm01013%3A352%3A100%7Cm01984%3A0%3A73
-m01866%3A0%3A48%7Cm01876%3A48%3A116%7Cm01977%3A0%3A43%7Cm01884%3A240%3A100%7Cm01978%3A0%3A258
-m00164%3A0%3A106%7Cm01350%3A0%3A717%7Cm00651%3A160%3A97%7Cm01351%3A0%3A233%7Cm00519%3A1760%3A121%7Cm01352%3A0%3A169%7Cm00053%3A1424%3A108%7Cm01353%3A0%3A107
-m01185%3A0%3A2080
-m01928%3A0%3A644
-m01348%3A0%3A578%7Cm00637%3A1952%3A97%7Cm01349%3A0%3A987
+m01228%3A0%3A14%7Cm00507%3A16%3A109%7Cm01360%3A0%3A690%7Cm00698%3A112%3A103%7Cm01361%3A0%3A697
+m01663%3A0%3A1055
+m01625%3A0%3A478%7Cm00699%3A80%3A100%7Cm01626%3A0%3A405%7Cm00053%3A1424%3A108%7Cm01232%3A0%3A31
+m02051%3A0%3A30%7Cm00997%3A32%3A106%7Cm02052%3A0%3A7%7Cm00998%3A1664%3A96%7Cm02053%3A0%3A154
+m01889%3A0%3A711
+m00682%3A0%3A191%7Cm01500%3A0%3A958%7Cm00755%3A2512%3A101%7Cm01501%3A0%3A63
+m01645%3A0%3A1083
+m00933%3A0%3A97%7Cm01458%3A0%3A1311
+m01825%3A0%3A77%7Cm01359%3A144%3A96%7Cm01826%3A0%3A654
+m00666%3A0%3A128%7Cm01890%3A0%3A11%7Cm01826%3A80%3A572
+m01810%3A0%3A19%7Cm01396%3A240%3A104%7Cm01811%3A0%3A744
+m01595%3A0%3A107%7Cm01396%3A240%3A103%7Cm01596%3A0%3A45%7Cm01428%3A112%3A97%7Cm01597%3A0%3A814
+m00055%3A0%3A104%7Cm01843%3A0%3A696
+m01842%3A0%3A801
+m01694%3A0%3A615%7Cm00698%3A112%3A102%7Cm01695%3A0%3A306
+m01228%3A0%3A14%7Cm01026%3A16%3A110%7Cm01654%3A0%3A942
+m01980%3A0%3A78%7Cm01776%3A640%3A98%7Cm01981%3A0%3A201%7Cm01013%3A352%3A100%7Cm01982%3A0%3A73
+m01864%3A0%3A48%7Cm01874%3A48%3A116%7Cm01975%3A0%3A43%7Cm01882%3A240%3A100%7Cm01976%3A0%3A258
+m00164%3A0%3A106%7Cm01348%3A0%3A717%7Cm00651%3A160%3A97%7Cm01349%3A0%3A233%7Cm00519%3A1760%3A121%7Cm01350%3A0%3A169%7Cm00053%3A1424%3A108%7Cm01351%3A0%3A107
+m01183%3A0%3A2080
+m01926%3A0%3A644
+m01346%3A0%3A578%7Cm00637%3A1952%3A97%7Cm01347%3A0%3A987
 m00656%3A0%3A3912
 m00055%3A0%3A104%7Cm00593%3A0%3A359%7Cm00475%3A400%3A193%7Cm00594%3A0%3A1154%7Cm00063%3A4736%3A161%7Cm00595%3A0%3A15%7Cm00475%3A2896%3A144%7Cm00596%3A0%3A224%7Cm00475%3A3392%3A126%7Cm00597%3A0%3A153%7Cm00475%3A3616%3A110%7Cm00598%3A0%3A1046%7Cm00475%3A4496%3A139%7Cm00599%3A0%3A278
 m00271%3A0%3A185%7Cm00453%3A0%3A215%7Cm00440%3A160%3A117%7Cm00454%3A0%3A261%7Cm00285%3A640%3A167%7Cm00455%3A0%3A960%7Cm00443%3A160%3A216%7Cm00456%3A0%3A119%7Cm00286%3A0%3A346%7Cm00457%3A0%3A205%7Cm00215%3A5104%3A106%7Cm00458%3A0%3A276%7Cm00215%3A5376%3A142%7Cm00459%3A0%3A1895
-m01452%3A0%3A107%7Cm01197%3A112%3A127%7Cm01453%3A0%3A1182
+m01450%3A0%3A107%7Cm01195%3A112%3A127%7Cm01451%3A0%3A1182
 m00616%3A0%3A67%7Cm00220%3A80%3A112%7Cm00751%3A0%3A1214%7Cm00327%3A448%3A124%7Cm00752%3A0%3A351%7Cm00343%3A352%3A122%7Cm00753%3A0%3A1570
 m00502%3A0%3A15%7Cm00062%3A16%3A117%7Cm00503%3A0%3A4696
-m02089%3A0%3A225
-m02071%3A0%3A319
-m02093%3A0%3A170
+m02087%3A0%3A225
+m02069%3A0%3A319
+m02091%3A0%3A170
 m00164%3A0%3A1370%7Cm00053%3A1376%3A133%7Cm00165%3A0%3A35%7Cm00143%3A432%3A96%7Cm00166%3A0%3A2644%7Cm00053%3A9792%3A105%7Cm00167%3A0%3A3969%7Cm00053%3A13312%3A100%7Cm00168%3A0%3A166
 m00063%3A0%3A5936%7Cm00062%3A4368%3A103%7Cm00064%3A0%3A6109
-m01222%3A0%3A1957
+m01220%3A0%3A1957
 m00620%3A0%3A2373%7Cm00351%3A4544%3A260%7Cm00621%3A0%3A55%7Cm00351%3A4864%3A143%7Cm00622%3A0%3A1206
 m00220%3A0%3A659%7Cm00003%3A2640%3A100%7Cm00221%3A0%3A7%7Cm00216%3A784%3A446%7Cm00222%3A0%3A406%7Cm00003%3A1776%3A129%7Cm00223%3A0%3A536%7Cm00217%3A336%3A103%7Cm00224%3A0%3A951%7Cm00217%3A1536%3A165%7Cm00225%3A0%3A7%7Cm00217%3A1712%3A117%7Cm00226%3A0%3A243%7Cm00217%3A2464%3A103%7Cm00227%3A0%3A605%7Cm00217%3A3360%3A111%7Cm00228%3A0%3A3350
-m00352%3A0%3A118%7Cm01144%3A0%3A2124
-m00682%3A0%3A145%7Cm01110%3A0%3A1431%7Cm00546%3A2160%3A101%7Cm01111%3A0%3A361%7Cm00683%3A192%3A112%7Cm01112%3A0%3A33%7Cm00057%3A12400%3A99%7Cm01113%3A0%3A62
+m00352%3A0%3A118%7Cm01142%3A0%3A2124
+m00682%3A0%3A145%7Cm01108%3A0%3A1431%7Cm00546%3A2160%3A101%7Cm01109%3A0%3A361%7Cm00683%3A192%3A112%7Cm01110%3A0%3A33%7Cm00057%3A12400%3A99%7Cm01111%3A0%3A62
 m00502%3A0%3A15%7Cm00816%3A16%3A188%7Cm00817%3A0%3A3%7Cm00816%3A208%3A118%7Cm00818%3A0%3A9%7Cm00816%3A336%3A356%7Cm00819%3A0%3A70%7Cm00816%3A784%3A102%7Cm00820%3A0%3A197%7Cm00816%3A1088%3A257%7Cm00821%3A0%3A14%7Cm00816%3A1360%3A328%7Cm00822%3A0%3A7%7Cm00816%3A1696%3A179%7Cm00823%3A0%3A12%7Cm00816%3A1888%3A210%7Cm00824%3A0%3A12%7Cm00710%3A48%3A108%7Cm00825%3A0%3A4%7Cm00816%3A2224%3A282%7Cm00826%3A0%3A5%7Cm00816%3A2512%3A406%7Cm00827%3A0%3A9%7Cm00816%3A2928%3A207%7Cm00828%3A0%3A7
 m00379%3A0%3A231%7Cm00789%3A0%3A41%7Cm00151%3A80%3A97%7Cm00790%3A0%3A193%7Cm00066%3A2688%3A162%7Cm00791%3A0%3A2535
 m00620%3A0%3A251%7Cm00711%3A0%3A2062%7Cm00620%3A2192%3A181%7Cm00351%3A4544%3A260%7Cm00621%3A0%3A55%7Cm00351%3A4864%3A143%7Cm00622%3A0%3A524%7Cm00712%3A0%3A222
-m01864%3A0%3A774
-m01530%3A0%3A123%7Cm01298%3A80%3A96%7Cm01531%3A0%3A1072
-m01230%3A0%3A14%7Cm01026%3A16%3A110%7Cm01510%3A0%3A1184
-m00352%3A0%3A112%7Cm01081%3A0%3A31%7Cm00993%3A208%3A97%7Cm01082%3A0%3A2243
-m00352%3A0%3A112%7Cm01583%3A0%3A1079
-m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01318%3A0%3A685%7Cm01148%3A144%3A135%7Cm01319%3A0%3A670
-m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01138%3A0%3A911%7Cm00003%3A2640%3A99%7Cm01139%3A0%3A117%7Cm00812%3A128%3A121%7Cm01140%3A0%3A26%7Cm00003%3A2640%3A99%7Cm01141%3A0%3A626
-m00908%3A0%3A109%7Cm00340%3A96%3A112%7Cm01155%3A0%3A6%7Cm01057%3A16%3A153%7Cm01156%3A0%3A388%7Cm01059%3A64%3A135%7Cm01157%3A0%3A557%7Cm00914%3A400%3A138%7Cm01158%3A0%3A602
-m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01346%3A0%3A491%7Cm01082%3A1760%3A98%7Cm01347%3A0%3A823
-m01197%3A0%3A239%7Cm00601%3A0%3A99%7Cm01198%3A0%3A891%7Cm00601%3A720%3A108%7Cm01199%3A0%3A686
+m01862%3A0%3A774
+m01528%3A0%3A123%7Cm01296%3A80%3A96%7Cm01529%3A0%3A1072
+m01228%3A0%3A14%7Cm01026%3A16%3A110%7Cm01508%3A0%3A1184
+m00352%3A0%3A112%7Cm01079%3A0%3A31%7Cm00993%3A208%3A97%7Cm01080%3A0%3A2243
+m00352%3A0%3A112%7Cm01581%3A0%3A1079
+m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01316%3A0%3A685%7Cm01146%3A144%3A135%7Cm01317%3A0%3A670
+m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01136%3A0%3A911%7Cm00003%3A2640%3A99%7Cm01137%3A0%3A117%7Cm00812%3A128%3A121%7Cm01138%3A0%3A26%7Cm00003%3A2640%3A99%7Cm01139%3A0%3A626
+m00908%3A0%3A109%7Cm00340%3A96%3A112%7Cm01153%3A0%3A6%7Cm01055%3A16%3A153%7Cm01154%3A0%3A388%7Cm01057%3A64%3A135%7Cm01155%3A0%3A557%7Cm00914%3A400%3A138%7Cm01156%3A0%3A602
+m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01344%3A0%3A491%7Cm01080%3A1760%3A98%7Cm01345%3A0%3A823
+m01195%3A0%3A239%7Cm00601%3A0%3A99%7Cm01196%3A0%3A891%7Cm00601%3A720%3A108%7Cm01197%3A0%3A686
 m00908%3A0%3A109%7Cm00340%3A96%3A104%7Cm00909%3A0%3A359%7Cm00512%3A96%3A99%7Cm00125%3A1152%3A100%7Cm00910%3A0%3A35%7Cm00513%3A32%3A130%7Cm00911%3A0%3A182%7Cm00762%3A1056%3A128%7Cm00912%3A0%3A14%7Cm00762%3A1200%3A108%7Cm00913%3A0%3A194%7Cm00003%3A2640%3A100%7Cm00914%3A0%3A1286
 m00600%3A0%3A95%7Cm00517%3A128%3A142%7Cm00601%3A0%3A1101%7Cm00003%3A2640%3A100%7Cm00602%3A0%3A1640%7Cm00003%3A2640%3A100%7Cm00603%3A0%3A1010
-m00668%3A0%3A121%7Cm00700%3A0%3A138%7Cm01102%3A0%3A181%7Cm00515%3A688%3A151%7Cm01103%3A0%3A1820
-m00668%3A0%3A121%7Cm00700%3A0%3A138%7Cm01445%3A0%3A598%7Cm00400%3A2432%3A96%7Cm01446%3A0%3A483
-m00668%3A0%3A121%7Cm00700%3A0%3A138%7Cm01381%3A0%3A244%7Cm00792%3A256%3A187%7Cm01382%3A0%3A871
+m00668%3A0%3A121%7Cm00700%3A0%3A138%7Cm01100%3A0%3A181%7Cm00515%3A688%3A151%7Cm01101%3A0%3A1820
+m00668%3A0%3A121%7Cm00700%3A0%3A138%7Cm01443%3A0%3A598%7Cm00400%3A2432%3A96%7Cm01444%3A0%3A483
+m00668%3A0%3A121%7Cm00700%3A0%3A138%7Cm01379%3A0%3A244%7Cm00792%3A256%3A187%7Cm01380%3A0%3A871
 m00399%3A0%3A69%7Cm00216%3A240%3A110%7Cm00400%3A0%3A3734%7Cm00003%3A2640%3A100%7Cm00401%3A0%3A1587
-m00908%3A0%3A109%7Cm00340%3A96%3A107%7Cm01057%3A0%3A327%7Cm00512%3A96%3A99%7Cm00125%3A1152%3A100%7Cm00910%3A0%3A35%7Cm00513%3A32%3A130%7Cm01058%3A0%3A42%7Cm00003%3A2640%3A100%7Cm01059%3A0%3A492%7Cm00914%3A352%3A186%7Cm01060%3A0%3A331%7Cm00914%3A800%3A168%7Cm01061%3A0%3A290
+m00908%3A0%3A109%7Cm00340%3A96%3A107%7Cm01055%3A0%3A327%7Cm00512%3A96%3A99%7Cm00125%3A1152%3A100%7Cm00910%3A0%3A35%7Cm00513%3A32%3A130%7Cm01056%3A0%3A42%7Cm00003%3A2640%3A100%7Cm01057%3A0%3A492%7Cm00914%3A352%3A186%7Cm01058%3A0%3A331%7Cm00914%3A800%3A168%7Cm01059%3A0%3A290
 m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm00810%3A0%3A521%7Cm00003%3A2640%3A100%7Cm00811%3A0%3A754%7Cm00003%3A2640%3A99%7Cm00812%3A0%3A278%7Cm00003%3A2640%3A99%7Cm00813%3A0%3A1064
-m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01147%3A0%3A1052%7Cm00003%3A2384%3A105%7Cm01148%3A0%3A813
+m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01145%3A0%3A1052%7Cm00003%3A2384%3A105%7Cm01146%3A0%3A813
 m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm00792%3A0%3A764%7Cm00003%3A2640%3A99%7Cm00793%3A0%3A296%7Cm00003%3A2640%3A99%7Cm00794%3A0%3A1740
 m00668%3A0%3A121%7Cm00700%3A0%3A416%7Cm00327%3A1200%3A110%7Cm00701%3A0%3A512%7Cm00003%3A2640%3A99%7Cm00702%3A0%3A156%7Cm00003%3A11728%3A285%7Cm00703%3A0%3A833%7Cm00003%3A2384%3A106%7Cm00704%3A0%3A158%7Cm00003%3A2640%3A99%7Cm00705%3A0%3A824
-m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01162%3A0%3A154%7Cm01138%3A176%3A121%7Cm01163%3A0%3A289%7Cm00003%3A12928%3A342%7Cm01164%3A0%3A29%7Cm00003%3A2640%3A99%7Cm01165%3A0%3A59%7Cm00515%3A1072%3A99%7Cm01166%3A0%3A16%7Cm00003%3A13408%3A103%7Cm01167%3A0%3A629
-m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01062%3A0%3A113%7Cm00810%3A176%3A102%7Cm01063%3A0%3A52%7Cm00810%3A320%3A118%7Cm01064%3A0%3A80%7Cm00003%3A2640%3A100%7Cm01065%3A0%3A101%7Cm00327%3A1328%3A110%7Cm01066%3A0%3A29%7Cm00327%3A1440%3A100%7Cm01067%3A0%3A1349
-m00352%3A0%3A108%7Cm01068%3A0%3A2395
-m01489%3A0%3A104%7Cm01069%3A128%3A105%7Cm01490%3A0%3A1126
-m01513%3A0%3A114%7Cm01538%3A0%3A27%7Cm00902%3A48%3A142%7Cm01539%3A0%3A984
+m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01160%3A0%3A154%7Cm01136%3A176%3A121%7Cm01161%3A0%3A289%7Cm00003%3A12928%3A342%7Cm01162%3A0%3A29%7Cm00003%3A2640%3A99%7Cm01163%3A0%3A59%7Cm00515%3A1072%3A99%7Cm01164%3A0%3A16%7Cm00003%3A13408%3A103%7Cm01165%3A0%3A629
+m00668%3A0%3A121%7Cm00700%3A0%3A132%7Cm01060%3A0%3A113%7Cm00810%3A176%3A102%7Cm01061%3A0%3A52%7Cm00810%3A320%3A118%7Cm01062%3A0%3A80%7Cm00003%3A2640%3A100%7Cm01063%3A0%3A101%7Cm00327%3A1328%3A110%7Cm01064%3A0%3A29%7Cm00327%3A1440%3A100%7Cm01065%3A0%3A1349
+m00352%3A0%3A108%7Cm01066%3A0%3A2395
+m01487%3A0%3A104%7Cm01067%3A128%3A105%7Cm01488%3A0%3A1126
+m01511%3A0%3A114%7Cm01536%3A0%3A27%7Cm00902%3A48%3A142%7Cm01537%3A0%3A984
 m00352%3A0%3A108%7Cm00902%3A0%3A2854
-m01230%3A0%3A14%7Cm01026%3A16%3A157%7Cm01266%3A0%3A661%7Cm01290%3A0%3A16%7Cm01266%3A672%3A619%7Cm01291%3A0%3A53%7Cm01267%3A0%3A296
-m01853%3A0%3A795
-m01280%3A0%3A21%7Cm00216%3A240%3A110%7Cm01936%3A0%3A216%7Cm00515%3A144%3A108%7Cm01937%3A0%3A178
-m01361%3A0%3A128%7Cm01898%3A0%3A572
-m01361%3A0%3A128%7Cm01365%3A0%3A1479
-m01341%3A0%3A1673
-m01361%3A0%3A113%7Cm01862%3A0%3A497%7Cm01341%3A1104%3A110%7Cm01863%3A0%3A56
-m01776%3A0%3A47%7Cm01298%3A48%3A125%7Cm01777%3A0%3A749
-m01219%3A0%3A1962
-m00055%3A0%3A104%7Cm01273%3A0%3A236%7Cm00141%3A1184%3A144%7Cm01274%3A0%3A409%7Cm00352%3A5024%3A100%7Cm01275%3A0%3A711%7Cm00056%3A10864%3A145
-m00055%3A0%3A104%7Cm01128%3A0%3A946%7Cm00054%3A3712%3A96%7Cm01129%3A0%3A924%7Cm00056%3A10864%3A118%7Cm01130%3A0%3A73
-m02022%3A0%3A445
-m00682%3A0%3A173%7Cm01313%3A0%3A928%7Cm00698%3A112%3A103%7Cm01314%3A0%3A562
-m01921%3A0%3A82%7Cm01404%3A112%3A100%7Cm01922%3A0%3A477
-m01624%3A0%3A90%7Cm01298%3A80%3A96%7Cm01625%3A0%3A937
-m02041%3A0%3A63%7Cm01144%3A0%3A110%7Cm02042%3A0%3A224
-m01361%3A0%3A110%7Cm02092%3A0%3A83
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02074%3A0%3A120
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02073%3A0%3A124
-m02041%3A0%3A63%7Cm01144%3A0%3A110%7Cm02058%3A0%3A205
-m02041%3A0%3A63%7Cm01144%3A0%3A110%7Cm02062%3A0%3A194
-m01707%3A0%3A16%7Cm02043%3A64%3A106%7Cm02078%3A0%3A131
-m01866%3A0%3A48%7Cm02043%3A48%3A122%7Cm02072%3A0%3A142
-m00666%3A0%3A128%7Cm02091%3A0%3A93
-m02041%3A0%3A63%7Cm01144%3A0%3A110%7Cm02063%3A0%3A194
-m01288%3A0%3A1064%7Cm00710%3A48%3A108%7Cm01289%3A0%3A647
-m01230%3A0%3A14%7Cm01026%3A16%3A157%7Cm01266%3A0%3A1291%7Cm00698%3A112%3A103%7Cm01267%3A0%3A298
-m02064%3A0%3A366
-m01361%3A0%3A110%7Cm01915%3A0%3A308%7Cm01898%3A320%3A252
-m01361%3A0%3A128%7Cm01632%3A0%3A72%7Cm01365%3A128%3A117%7Cm01633%3A0%3A14%7Cm01365%3A272%3A218%7Cm01634%3A0%3A96%7Cm01365%3A512%3A176%7Cm01635%3A0%3A297
-m01955%3A0%3A599
-m01866%3A0%3A48%7Cm01955%3A48%3A173%7Cm01974%3A0%3A21%7Cm01955%3A272%3A327
-m02080%3A0%3A241
-m01749%3A0%3A583%7Cm00273%3A3152%3A118%7Cm01750%3A0%3A251
-m01461%3A0%3A1405
-m02038%3A0%3A405
+m01228%3A0%3A14%7Cm01026%3A16%3A157%7Cm01264%3A0%3A661%7Cm01288%3A0%3A16%7Cm01264%3A672%3A619%7Cm01289%3A0%3A53%7Cm01265%3A0%3A296
+m01851%3A0%3A795
+m01278%3A0%3A21%7Cm00216%3A240%3A110%7Cm01934%3A0%3A216%7Cm00515%3A144%3A108%7Cm01935%3A0%3A178
+m01359%3A0%3A128%7Cm01896%3A0%3A572
+m01359%3A0%3A128%7Cm01363%3A0%3A1479
+m01339%3A0%3A1673
+m01359%3A0%3A113%7Cm01860%3A0%3A497%7Cm01339%3A1104%3A110%7Cm01861%3A0%3A56
+m01774%3A0%3A47%7Cm01296%3A48%3A125%7Cm01775%3A0%3A749
+m01217%3A0%3A1962
+m00055%3A0%3A104%7Cm01271%3A0%3A236%7Cm00141%3A1184%3A144%7Cm01272%3A0%3A409%7Cm00352%3A5024%3A100%7Cm01273%3A0%3A711%7Cm00056%3A10864%3A145
+m00055%3A0%3A104%7Cm01126%3A0%3A946%7Cm00054%3A3712%3A96%7Cm01127%3A0%3A924%7Cm00056%3A10864%3A118%7Cm01128%3A0%3A73
+m02020%3A0%3A445
+m00682%3A0%3A173%7Cm01311%3A0%3A928%7Cm00698%3A112%3A103%7Cm01312%3A0%3A562
+m01919%3A0%3A82%7Cm01402%3A112%3A100%7Cm01920%3A0%3A477
+m01622%3A0%3A90%7Cm01296%3A80%3A96%7Cm01623%3A0%3A937
+m02039%3A0%3A63%7Cm01142%3A0%3A110%7Cm02040%3A0%3A224
+m01359%3A0%3A110%7Cm02090%3A0%3A83
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02072%3A0%3A120
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02071%3A0%3A124
+m02039%3A0%3A63%7Cm01142%3A0%3A110%7Cm02056%3A0%3A205
+m02039%3A0%3A63%7Cm01142%3A0%3A110%7Cm02060%3A0%3A194
+m01705%3A0%3A16%7Cm02041%3A64%3A106%7Cm02076%3A0%3A131
+m01864%3A0%3A48%7Cm02041%3A48%3A122%7Cm02070%3A0%3A142
+m00666%3A0%3A128%7Cm02089%3A0%3A93
+m02039%3A0%3A63%7Cm01142%3A0%3A110%7Cm02061%3A0%3A194
+m01286%3A0%3A1064%7Cm00710%3A48%3A108%7Cm01287%3A0%3A647
+m01228%3A0%3A14%7Cm01026%3A16%3A157%7Cm01264%3A0%3A1291%7Cm00698%3A112%3A103%7Cm01265%3A0%3A298
+m02062%3A0%3A366
+m01359%3A0%3A110%7Cm01913%3A0%3A308%7Cm01896%3A320%3A252
+m01359%3A0%3A128%7Cm01630%3A0%3A72%7Cm01363%3A128%3A117%7Cm01631%3A0%3A14%7Cm01363%3A272%3A218%7Cm01632%3A0%3A96%7Cm01363%3A512%3A176%7Cm01633%3A0%3A297
+m01953%3A0%3A599
+m01864%3A0%3A48%7Cm01953%3A48%3A173%7Cm01972%3A0%3A21%7Cm01953%3A272%3A327
+m02078%3A0%3A241
+m01747%3A0%3A583%7Cm00273%3A3152%3A118%7Cm01748%3A0%3A251
+m01459%3A0%3A1405
+m02036%3A0%3A405
 m00504%3A0%3A791%7Cm00421%3A688%3A125%7Cm00505%3A0%3A2904%7Cm00421%3A2720%3A216%7Cm00506%3A0%3A717
 m00055%3A0%3A105%7Cm00170%3A0%3A585%7Cm00106%3A624%3A148%7Cm00171%3A0%3A3%7Cm00106%3A784%3A110%7Cm00172%3A0%3A128%7Cm00106%3A1152%3A98%7Cm00173%3A0%3A61%7Cm00063%3A4736%3A170%7Cm00174%3A0%3A1649%7Cm00107%3A1920%3A97%7Cm00175%3A0%3A394%7Cm00063%3A5056%3A294%7Cm00176%3A0%3A162%7Cm00064%3A368%3A146%7Cm00177%3A0%3A144%7Cm00064%3A800%3A116%7Cm00111%3A0%3A192%7Cm00178%3A0%3A1028%7Cm00111%3A1456%3A120%7Cm00179%3A0%3A594%7Cm00112%3A1120%3A99%7Cm00180%3A0%3A1355%7Cm00112%3A2576%3A197%7Cm00181%3A0%3A298
-m00352%3A0%3A108%7Cm01095%3A0%3A43%7Cm00993%3A208%3A97%7Cm01096%3A0%3A2192
+m00352%3A0%3A108%7Cm01093%3A0%3A43%7Cm00993%3A208%3A97%7Cm01094%3A0%3A2192
 m00084%3A0%3A11101
 m00200%3A0%3A120%7Cm00370%3A0%3A1862%7Cm00200%3A1872%3A97%7Cm00058%3A2576%3A147%7Cm00371%3A0%3A88%7Cm00058%3A2816%3A96%7Cm00372%3A0%3A3656
 m00052%3A0%3A14423
 m00113%3A0%3A105%7Cm00070%3A96%3A165%7Cm00114%3A0%3A133%7Cm00070%3A320%3A98%7Cm00115%3A0%3A1185%7Cm00070%3A1632%3A227%7Cm00116%3A0%3A170%7Cm00052%3A9136%3A141%7Cm00117%3A0%3A19%7Cm00101%3A1840%3A177%7Cm00118%3A0%3A2425%7Cm00003%3A2640%3A99%7Cm00119%3A0%3A844%7Cm00101%3A2352%3A225%7Cm00120%3A0%3A66%7Cm00101%3A2656%3A230%7Cm00121%3A0%3A10%7Cm00101%3A2896%3A176%7Cm00122%3A0%3A1026%7Cm00052%3A8016%3A137%7Cm00123%3A0%3A8%7Cm00072%3A2064%3A142%7Cm00124%3A0%3A1886
 m00169%3A0%3A1393%7Cm00195%3A0%3A100%7Cm00169%3A1392%3A1122%7Cm00196%3A0%3A251%7Cm00169%3A3088%3A790%7Cm00169%3A3920%3A103%7Cm00197%3A0%3A29%7Cm00169%3A4032%3A2081%7Cm00198%3A0%3A81%7Cm00169%3A6336%3A365%7Cm00199%3A0%3A94%7Cm00169%3A6896%3A1709
 m00352%3A0%3A6357
-m01280%3A0%3A21%7Cm00216%3A240%3A110%7Cm01281%3A0%3A531%7Cm00003%3A2640%3A100%7Cm01282%3A0%3A1064
+m01278%3A0%3A21%7Cm00216%3A240%3A110%7Cm01279%3A0%3A531%7Cm00003%3A2640%3A100%7Cm01280%3A0%3A1064
 m00662%3A0%3A15%7Cm00676%3A16%3A251%7Cm00835%3A0%3A2052%7Cm00391%3A80%3A375%7Cm00836%3A0%3A397
-m01715%3A0%3A998
-m00352%3A0%3A118%7Cm01639%3A0%3A106%7Cm01652%3A0%3A23%7Cm01639%3A112%3A322%7Cm01653%3A0%3A81%7Cm01639%3A560%3A430
-m00352%3A0%3A118%7Cm01639%3A0%3A992
-m00055%3A0%3A104%7Cm00582%3A0%3A94%7Cm00559%3A96%3A142%7Cm01159%3A0%3A218%7Cm00475%3A544%3A102%7Cm01160%3A0%3A528%7Cm00568%3A192%3A126%7Cm01161%3A0%3A885
+m01713%3A0%3A998
+m00352%3A0%3A118%7Cm01637%3A0%3A106%7Cm01650%3A0%3A23%7Cm01637%3A112%3A322%7Cm01651%3A0%3A81%7Cm01637%3A560%3A430
+m00352%3A0%3A118%7Cm01637%3A0%3A992
+m00055%3A0%3A104%7Cm00582%3A0%3A94%7Cm00559%3A96%3A142%7Cm01157%3A0%3A218%7Cm00475%3A544%3A102%7Cm01158%3A0%3A528%7Cm00568%3A192%3A126%7Cm01159%3A0%3A885
 m00055%3A0%3A104%7Cm00706%3A0%3A482%7Cm00106%3A1056%3A135%7Cm00707%3A0%3A100%7Cm00106%3A1200%3A114%7Cm00063%3A4736%3A170%7Cm00708%3A0%3A1047%7Cm00112%3A272%3A466%7Cm00709%3A0%3A7%7Cm00112%3A752%3A155%7Cm00710%3A0%3A933
-m00772%3A0%3A76%7Cm00216%3A240%3A110%7Cm00773%3A0%3A138%7Cm01506%3A0%3A987
+m00772%3A0%3A76%7Cm00216%3A240%3A110%7Cm00773%3A0%3A138%7Cm01504%3A0%3A987
 m00352%3A0%3A118%7Cm00799%3A0%3A734%7Cm00392%3A992%3A119%7Cm00800%3A0%3A2258
-m00352%3A0%3A118%7Cm01639%3A0%3A106%7Cm01681%3A0%3A28%7Cm01639%3A144%3A290%7Cm01682%3A0%3A80%7Cm01639%3A560%3A184%7Cm01683%3A0%3A107%7Cm01639%3A864%3A124
-m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01292%3A0%3A99%7Cm00867%3A96%3A133%7Cm01293%3A0%3A350%7Cm00003%3A2640%3A99%7Cm01294%3A0%3A50%7Cm00868%3A704%3A101%7Cm01295%3A0%3A808
+m00352%3A0%3A118%7Cm01637%3A0%3A106%7Cm01679%3A0%3A28%7Cm01637%3A144%3A290%7Cm01680%3A0%3A80%7Cm01637%3A560%3A184%7Cm01681%3A0%3A107%7Cm01637%3A864%3A124
+m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01290%3A0%3A99%7Cm00867%3A96%3A133%7Cm01291%3A0%3A350%7Cm00003%3A2640%3A99%7Cm01292%3A0%3A50%7Cm00868%3A704%3A101%7Cm01293%3A0%3A808
 m01020%3A0%3A66%7Cm00216%3A240%3A110%7Cm01021%3A0%3A430%7Cm00003%3A2640%3A99%7Cm01022%3A0%3A10%7Cm00003%3A2640%3A100%7Cm01023%3A0%3A349%7Cm00003%3A13040%3A133%7Cm01024%3A0%3A402%7Cm00003%3A2384%3A105%7Cm01025%3A0%3A794
-m01511%3A0%3A111%7Cm00643%3A1152%3A106%7Cm01512%3A0%3A1091
+m01509%3A0%3A111%7Cm00643%3A1152%3A106%7Cm01510%3A0%3A1091
 m00059%3A0%3A125%7Cm00073%3A0%3A11046
-m00055%3A0%3A104%7Cm01246%3A0%3A42%7Cm01013%3A1328%3A112%7Cm01247%3A0%3A31%7Cm00237%3A560%3A131%7Cm01248%3A0%3A6%7Cm00339%3A2864%3A124%7Cm01249%3A0%3A1351
-m01105%3A0%3A1206%7Cm00369%3A2368%3A109%7Cm01106%3A0%3A1058
+m00055%3A0%3A104%7Cm01244%3A0%3A42%7Cm01013%3A1328%3A112%7Cm01245%3A0%3A31%7Cm00237%3A560%3A131%7Cm01246%3A0%3A6%7Cm00339%3A2864%3A124%7Cm01247%3A0%3A1351
+m01103%3A0%3A1206%7Cm00369%3A2368%3A109%7Cm01104%3A0%3A1058
 m01027%3A0%3A1433%7Cm00273%3A3136%3A134%7Cm01028%3A0%3A409%7Cm00877%3A864%3A96%7Cm01029%3A0%3A38%7Cm00464%3A1168%3A105%7Cm01030%3A0%3A3%7Cm00464%3A1280%3A130%7Cm01031%3A0%3A31%7Cm00274%3A560%3A133%7Cm01032%3A0%3A78
 m00055%3A0%3A104%7Cm00879%3A0%3A68%7Cm00214%3A3744%3A97%7Cm00743%3A0%3A101%7Cm00141%3A1744%3A107%7Cm00880%3A0%3A940%7Cm00146%3A928%3A114%7Cm00881%3A0%3A56%7Cm00746%3A160%3A117%7Cm00882%3A0%3A11%7Cm00746%3A288%3A96%7Cm00883%3A0%3A223%7Cm00397%3A1776%3A255%7Cm00884%3A0%3A599%7Cm00056%3A10848%3A161
 m00055%3A0%3A104%7Cm00741%3A0%3A88%7Cm00143%3A320%3A103%7Cm00742%3A0%3A3%7Cm00214%3A3744%3A97%7Cm00743%3A0%3A101%7Cm00141%3A1744%3A107%7Cm00744%3A0%3A114%7Cm00144%3A976%3A145%7Cm00745%3A0%3A636%7Cm00146%3A928%3A97%7Cm00746%3A0%3A1811%7Cm00056%3A10848%3A161
 m00055%3A0%3A104%7Cm00139%3A0%3A73%7Cm00055%3A1008%3A115%7Cm00140%3A0%3A627%7Cm00056%3A224%3A149%7Cm00141%3A0%3A7603%7Cm00056%3A10736%3A97%7Cm00142%3A0%3A29%7Cm00056%3A10864%3A145
 m00143%3A0%3A724%7Cm00066%3A6016%3A107%7Cm00144%3A0%3A1564%7Cm00141%3A1744%3A107%7Cm00145%3A0%3A541%7Cm00056%3A752%3A159%7Cm00146%3A0%3A1752%7Cm00060%3A7520%3A159%7Cm00147%3A0%3A971%7Cm00060%3A6160%3A288%7Cm00148%3A0%3A214%7Cm00060%3A6608%3A131%7Cm00149%3A0%3A2062%7Cm00056%3A10848%3A161
-m01688%3A0%3A188%7Cm01159%3A112%3A103%7Cm01689%3A0%3A739
-m00875%3A0%3A19%7Cm00682%3A16%3A153%7Cm01631%3A0%3A947
-m01684%3A0%3A1034
+m01686%3A0%3A188%7Cm01157%3A112%3A103%7Cm01687%3A0%3A739
+m00875%3A0%3A19%7Cm00682%3A16%3A153%7Cm01629%3A0%3A947
+m01682%3A0%3A1034
 m00243%3A0%3A141%7Cm00214%3A144%3A150%7Cm00244%3A0%3A9%7Cm00214%3A304%3A167%7Cm00245%3A0%3A114%7Cm00214%3A592%3A117%7Cm00246%3A0%3A10%7Cm00214%3A720%3A172%7Cm00247%3A0%3A3%7Cm00214%3A896%3A157%7Cm00248%3A0%3A49%7Cm00214%3A1104%3A128%7Cm00249%3A0%3A15%7Cm00214%3A1248%3A142%7Cm00250%3A0%3A96%7Cm00214%3A1488%3A110%7Cm00035%3A0%3A1%7Cm00214%3A1600%3A511%7Cm00214%3A2112%3A237%7Cm00251%3A0%3A123%7Cm00214%3A2480%3A191%7Cm00252%3A0%3A253%7Cm00214%3A2896%3A179%7Cm00253%3A0%3A79%7Cm00214%3A3408%3A97%7Cm00254%3A0%3A14%7Cm00214%3A3520%3A188%7Cm00255%3A0%3A33%7Cm00214%3A3744%3A97%7Cm00256%3A0%3A14%7Cm00214%3A3856%3A168%7Cm00257%3A0%3A164%7Cm00214%3A4192%3A110%7Cm00258%3A0%3A158%7Cm00214%3A4464%3A177%7Cm00259%3A0%3A375%7Cm00214%3A5024%3A99%7Cm00260%3A0%3A422%7Cm00214%3A5552%3A276%7Cm00261%3A0%3A263%7Cm00214%3A6096%3A100%7Cm00262%3A0%3A11%7Cm00214%3A6208%3A139%7Cm00263%3A0%3A3%7Cm00214%3A6352%3A215%7Cm00264%3A0%3A8%7Cm00214%3A6576%3A120%7Cm00265%3A0%3A7%7Cm00214%3A6704%3A179%7Cm00266%3A0%3A12%7Cm00214%3A6896%3A138%7Cm00267%3A0%3A5%7Cm00214%3A7040%3A395%7Cm00268%3A0%3A4%7Cm00214%3A7440%3A113%7Cm00269%3A0%3A14%7Cm00214%3A7568%3A245%7Cm00270%3A0%3A278
 m00466%3A0%3A73%7Cm00216%3A240%3A110%7Cm00467%3A0%3A4938
 m00214%3A0%3A8103
-m00352%3A0%3A108%7Cm01468%3A0%3A1279
-m01182%3A0%3A135%7Cm00503%3A144%3A99%7Cm01183%3A0%3A1208%7Cm00062%3A7936%3A406%7Cm01184%3A0%3A269
-m01778%3A0%3A914
-m01376%3A0%3A303%7Cm01240%3A0%3A121%7Cm01377%3A0%3A995%7Cm00056%3A10864%3A145
-m01495%3A0%3A32%7Cm01482%3A32%3A114%7Cm01404%3A112%3A129%7Cm01483%3A0%3A246%7Cm01496%3A0%3A144%7Cm01483%3A384%3A312%7Cm01497%3A0%3A11%7Cm01483%3A736%3A342%7Cm00096%3A0%3A2
-m01482%3A0%3A146%7Cm01404%3A112%3A129%7Cm01483%3A0%3A1078
+m00352%3A0%3A108%7Cm01466%3A0%3A1279
+m01180%3A0%3A135%7Cm00503%3A144%3A99%7Cm01181%3A0%3A1208%7Cm00062%3A7936%3A406%7Cm01182%3A0%3A269
+m01776%3A0%3A914
+m01374%3A0%3A303%7Cm01238%3A0%3A121%7Cm01375%3A0%3A995%7Cm00056%3A10864%3A145
+m01493%3A0%3A32%7Cm01480%3A32%3A114%7Cm01402%3A112%3A129%7Cm01481%3A0%3A246%7Cm01494%3A0%3A144%7Cm01481%3A384%3A312%7Cm01495%3A0%3A11%7Cm01481%3A736%3A342%7Cm00096%3A0%3A2
+m01480%3A0%3A146%7Cm01402%3A112%3A129%7Cm01481%3A0%3A1078
 m00668%3A0%3A877%7Cm00327%3A304%3A235%7Cm00669%3A0%3A145%7Cm00327%3A688%3A112%7Cm00670%3A0%3A1474%7Cm00513%3A336%3A109%7Cm00671%3A0%3A17%7Cm00327%3A3648%3A126%7Cm00672%3A0%3A15%7Cm00327%3A3808%3A200%7Cm00673%3A0%3A533
 m00623%3A0%3A149%7Cm00070%3A144%3A147%7Cm00624%3A0%3A263%7Cm00101%3A1872%3A101%7Cm00625%3A0%3A431%7Cm00118%3A384%3A229%7Cm00626%3A0%3A1008%7Cm00205%3A112%3A108%7Cm00627%3A0%3A329%7Cm00119%3A16%3A101%7Cm00628%3A0%3A302%7Cm00119%3A384%3A259%7Cm00629%3A0%3A165%7Cm00119%3A704%3A109%7Cm00630%3A0%3A331
 m00493%3A0%3A66%7Cm00065%3A80%3A132%7Cm00494%3A0%3A4710
-m01099%3A0%3A140%7Cm00656%3A112%3A128%7Cm01100%3A0%3A756%7Cm00740%3A848%3A118%7Cm01101%3A0%3A1280
-m01076%3A0%3A32%7Cm00979%3A32%3A138%7Cm00782%3A176%3A101%7Cm01077%3A0%3A956%7Cm00981%3A64%3A154%7Cm01078%3A0%3A70%7Cm00981%3A272%3A97%7Cm01079%3A0%3A8%7Cm00980%3A688%3A150%7Cm01080%3A0%3A786
+m01097%3A0%3A140%7Cm00656%3A112%3A128%7Cm01098%3A0%3A756%7Cm00740%3A848%3A118%7Cm01099%3A0%3A1280
+m01074%3A0%3A32%7Cm00979%3A32%3A138%7Cm00782%3A176%3A101%7Cm01075%3A0%3A956%7Cm00981%3A64%3A154%7Cm01076%3A0%3A70%7Cm00981%3A272%3A97%7Cm01077%3A0%3A8%7Cm00980%3A688%3A150%7Cm01078%3A0%3A786
 m00645%3A0%3A369%7Cm00674%3A0%3A3%7Cm00645%3A384%3A1312%7Cm00675%3A0%3A140%7Cm00645%3A1920%3A2011
 m00422%3A0%3A100%7Cm00065%3A80%3A102%7Cm00423%3A0%3A5284
 m00065%3A0%3A12137
 m00057%3A0%3A12889
 m00614%3A0%3A4064
 m00055%3A0%3A104%7Cm00540%3A0%3A3221%7Cm00111%3A1456%3A120%7Cm00541%3A0%3A38%7Cm00179%3A48%3A123%7Cm00542%3A0%3A781
-m01226%3A0%3A349%7Cm00738%3A208%3A124%7Cm01227%3A0%3A1464
-m01942%3A0%3A148%7Cm00774%3A848%3A118%7Cm01943%3A0%3A363
-m01613%3A0%3A134%7Cm00729%3A128%3A119%7Cm01614%3A0%3A11%7Cm01564%3A64%3A127%7Cm01615%3A0%3A13%7Cm01564%3A240%3A105%7Cm01616%3A0%3A625
+m01224%3A0%3A349%7Cm00738%3A208%3A124%7Cm01225%3A0%3A1464
+m01940%3A0%3A148%7Cm00774%3A848%3A118%7Cm01941%3A0%3A363
+m01611%3A0%3A134%7Cm00729%3A128%3A119%7Cm01612%3A0%3A11%7Cm01562%3A64%3A127%7Cm01613%3A0%3A13%7Cm01562%3A240%3A105%7Cm01614%3A0%3A625
 m00470%3A0%3A5111
-m00352%3A0%3A108%7Cm01153%3A0%3A780%7Cm01146%3A368%3A107%7Cm01154%3A0%3A1210
+m00352%3A0%3A108%7Cm01151%3A0%3A780%7Cm01144%3A368%3A107%7Cm01152%3A0%3A1210
 m00379%3A0%3A166%7Cm00890%3A0%3A73%7Cm00151%3A80%3A97%7Cm00891%3A0%3A23%7Cm00790%3A32%3A161%7Cm00066%3A2688%3A162%7Cm00892%3A0%3A1145%7Cm00791%3A1248%3A106%7Cm00893%3A0%3A273%7Cm00791%3A1568%3A110%7Cm00894%3A0%3A181%7Cm00791%3A1968%3A167%7Cm00895%3A0%3A14%7Cm00791%3A2192%3A168%7Cm00896%3A0%3A81%7Cm00791%3A2432%3A103
 m00502%3A0%3A15%7Cm00062%3A16%3A118%7Cm00950%3A0%3A2031%7Cm00816%3A2512%3A193%7Cm00951%3A0%3A439
 m00055%3A0%3A104%7Cm00615%3A0%3A3952
-m01334%3A0%3A98%7Cm01380%3A0%3A1465
+m01332%3A0%3A98%7Cm01378%3A0%3A1465
 m00340%3A0%3A219%7Cm00125%3A256%3A115%7Cm00341%3A0%3A576%7Cm00003%3A2800%3A129%7Cm00342%3A0%3A345%7Cm00327%3A3808%3A200%7Cm00343%3A0%3A588%7Cm00003%3A2080%3A113%7Cm00344%3A0%3A3075%7Cm00003%3A2640%3A100%7Cm00345%3A0%3A956
 m00216%3A0%3A149%7Cm00325%3A0%3A41%7Cm00216%3A240%3A132%7Cm00326%3A0%3A398%7Cm00003%3A2640%3A100%7Cm00327%3A0%3A5328%7Cm00003%3A11664%3A150%7Cm00328%3A0%3A80%7Cm00003%3A11888%3A108%7Cm00329%3A0%3A558
 m00908%3A0%3A109%7Cm00340%3A96%3A107%7Cm00953%3A0%3A342%7Cm00513%3A32%3A130%7Cm00954%3A0%3A126%7Cm00125%3A1152%3A100%7Cm00955%3A0%3A64%7Cm00911%3A32%3A150%7Cm00956%3A0%3A27%7Cm00762%3A1200%3A108%7Cm00957%3A0%3A12%7Cm00003%3A2320%3A169%7Cm00958%3A0%3A11%7Cm00913%3A80%3A114%7Cm00003%3A2640%3A100%7Cm00959%3A0%3A322%7Cm00914%3A352%3A117%7Cm00960%3A0%3A307%7Cm00914%3A800%3A148%7Cm00961%3A0%3A207
-m01418%3A0%3A268%7Cm01013%3A1344%3A96%7Cm01419%3A0%3A942%7Cm00584%3A3056%3A143%7Cm01420%3A0%3A36
-m00631%3A0%3A102%7Cm00582%3A0%3A94%7Cm00559%3A96%3A142%7Cm01320%3A0%3A171%7Cm00583%3A320%3A105%7Cm01150%3A0%3A106%7Cm01321%3A0%3A240%7Cm00584%3A672%3A254%7Cm01322%3A0%3A329%7Cm00584%3A3056%3A143%7Cm01323%3A0%3A55
-m01516%3A0%3A191%7Cm01013%3A1344%3A96%7Cm01419%3A0%3A236%7Cm01517%3A0%3A143%7Cm01419%3A448%3A98%7Cm01518%3A0%3A205%7Cm01419%3A784%3A129%7Cm01519%3A0%3A25%7Cm00584%3A3056%3A143%7Cm01520%3A0%3A40
-m01462%3A0%3A304%7Cm01334%3A432%3A125%7Cm00058%3A2656%3A147%7Cm01335%3A0%3A106%7Cm01463%3A0%3A723
+m01416%3A0%3A268%7Cm01013%3A1344%3A96%7Cm01417%3A0%3A942%7Cm00584%3A3056%3A143%7Cm01418%3A0%3A36
+m00631%3A0%3A102%7Cm00582%3A0%3A94%7Cm00559%3A96%3A142%7Cm01318%3A0%3A171%7Cm00583%3A320%3A105%7Cm01148%3A0%3A106%7Cm01319%3A0%3A240%7Cm00584%3A672%3A254%7Cm01320%3A0%3A329%7Cm00584%3A3056%3A143%7Cm01321%3A0%3A55
+m01514%3A0%3A191%7Cm01013%3A1344%3A96%7Cm01417%3A0%3A236%7Cm01515%3A0%3A143%7Cm01417%3A448%3A98%7Cm01516%3A0%3A205%7Cm01417%3A784%3A129%7Cm01517%3A0%3A25%7Cm00584%3A3056%3A143%7Cm01518%3A0%3A40
+m01460%3A0%3A304%7Cm01332%3A432%3A125%7Cm00058%3A2656%3A147%7Cm01333%3A0%3A106%7Cm01461%3A0%3A723
 m00668%3A0%3A171%7Cm00762%3A0%3A2047%7Cm00003%3A2640%3A99%7Cm00763%3A0%3A1226
 m00357%3A0%3A83%7Cm00084%3A96%3A107%7Cm00358%3A0%3A1185%7Cm00084%3A3200%3A174%7Cm00359%3A0%3A6%7Cm00084%3A3392%3A103%7Cm00360%3A0%3A6%7Cm00084%3A3504%3A131%7Cm00084%3A3648%3A174%7Cm00361%3A0%3A28%7Cm00084%3A3856%3A114%7Cm00362%3A0%3A32%7Cm00084%3A6336%3A99%7Cm00363%3A0%3A28%7Cm00084%3A6576%3A161%7Cm00364%3A0%3A322%7Cm00084%3A3952%3A668%7Cm00365%3A0%3A1444%7Cm00084%3A8512%3A141%7Cm00366%3A0%3A500%7Cm00084%3A9680%3A159%7Cm00367%3A0%3A209%7Cm00084%3A10736%3A107%7Cm00368%3A0%3A10%7Cm00084%3A10848%3A253
 m00782%3A0%3A3329
 m00616%3A0%3A67%7Cm00220%3A80%3A145%7Cm00617%3A0%3A157%7Cm00326%3A272%3A126%7Cm00003%3A2640%3A100%7Cm00618%3A0%3A1854%7Cm00217%3A3360%3A111%7Cm00619%3A0%3A1483
-m01912%3A0%3A81%7Cm01298%3A80%3A96%7Cm01913%3A0%3A501
-m01354%3A0%3A177%7Cm01240%3A0%3A121%7Cm01355%3A0%3A1199%7Cm00056%3A10848%3A161
+m01910%3A0%3A81%7Cm01296%3A80%3A96%7Cm01911%3A0%3A501
+m01352%3A0%3A177%7Cm01238%3A0%3A121%7Cm01353%3A0%3A1199%7Cm00056%3A10848%3A161
 m00845%3A0%3A401%7Cm00423%3A32%3A96%7Cm00846%3A0%3A876%7Cm00494%3A1824%3A150%7Cm00847%3A0%3A1555
-m02059%3A0%3A370
+m02057%3A0%3A370
 m00676%3A0%3A841%7Cm00389%3A976%3A105%7Cm00677%3A0%3A342%7Cm00352%3A4912%3A102%7Cm00678%3A0%3A12%7Cm00108%3A240%3A96%7Cm00679%3A0%3A722%7Cm00352%3A4912%3A98%7Cm00678%3A0%3A12%7Cm00108%3A240%3A96%7Cm00680%3A0%3A14%7Cm00166%3A2336%3A96%7Cm00681%3A0%3A1292
-m02011%3A0%3A477
-m02005%3A0%3A495
-m01516%3A0%3A96%7Cm00916%3A0%3A34%7Cm00586%3A208%3A119%7Cm01636%3A0%3A232%7Cm00339%3A2864%3A129%7Cm01637%3A0%3A163%7Cm00588%3A96%3A124%7Cm01638%3A0%3A220
-m02012%3A0%3A47%7Cm02011%3A48%3A126%7Cm02013%3A0%3A2%7Cm02011%3A176%3A300%7Cm00096%3A0%3A2
-m00352%3A0%3A118%7Cm01300%3A0%3A78%7Cm00831%3A80%3A108%7Cm00922%3A0%3A7%7Cm00831%3A192%3A109%7Cm01301%3A0%3A1369
-m01220%3A0%3A120%7Cm01144%3A0%3A110%7Cm01221%3A0%3A1731
+m02009%3A0%3A477
+m02003%3A0%3A495
+m01514%3A0%3A96%7Cm00916%3A0%3A34%7Cm00586%3A208%3A119%7Cm01634%3A0%3A232%7Cm00339%3A2864%3A129%7Cm01635%3A0%3A163%7Cm00588%3A96%3A124%7Cm01636%3A0%3A220
+m02010%3A0%3A47%7Cm02009%3A48%3A126%7Cm02011%3A0%3A2%7Cm02009%3A176%3A300%7Cm00096%3A0%3A2
+m00352%3A0%3A118%7Cm01298%3A0%3A78%7Cm00831%3A80%3A108%7Cm00922%3A0%3A7%7Cm00831%3A192%3A109%7Cm01299%3A0%3A1369
+m01218%3A0%3A120%7Cm01142%3A0%3A110%7Cm01219%3A0%3A1731
 m00352%3A0%3A118%7Cm00921%3A0%3A99%7Cm00831%3A80%3A108%7Cm00922%3A0%3A7%7Cm00831%3A192%3A109%7Cm00923%3A0%3A835%7Cm00832%3A80%3A115%7Cm00924%3A0%3A471%7Cm00832%3A624%3A351%7Cm00925%3A0%3A30%7Cm00374%3A3200%3A100%7Cm00926%3A0%3A597
 m00164%3A0%3A275%7Cm00184%3A0%3A855%7Cm00143%3A432%3A96%7Cm00185%3A0%3A184%7Cm00053%3A1744%3A247%7Cm00186%3A0%3A67%7Cm00053%3A2064%3A97%7Cm00187%3A0%3A104%7Cm00053%3A2720%3A228%7Cm00188%3A0%3A10%7Cm00053%3A2288%3A97%7Cm00189%3A0%3A4%7Cm00053%3A1360%3A184%7Cm00190%3A0%3A883%7Cm00053%3A7696%3A160%7Cm00191%3A0%3A726%7Cm00166%3A1952%3A102%7Cm00192%3A0%3A490%7Cm00003%3A2640%3A100%7Cm00193%3A0%3A200%7Cm00167%3A368%3A96%7Cm00194%3A0%3A2934
-m01399%3A0%3A1101%7Cm00421%3A2720%3A174%7Cm01400%3A0%3A260
+m01397%3A0%3A1101%7Cm00421%3A2720%3A174%7Cm01398%3A0%3A260
 m00216%3A0%3A1330%7Cm00003%3A1776%3A129%7Cm00217%3A0%3A3869%7Cm00003%3A12112%3A112%7Cm00218%3A0%3A1420%7Cm00003%3A2640%3A100%7Cm00219%3A0%3A1141
-m01189%3A0%3A129%7Cm00738%3A144%3A113%7Cm01190%3A0%3A475%7Cm00774%3A1328%3A156%7Cm00747%3A752%3A131%7Cm01191%3A0%3A3%7Cm00775%3A32%3A128%7Cm01192%3A0%3A917
+m01187%3A0%3A129%7Cm00738%3A144%3A113%7Cm01188%3A0%3A475%7Cm00774%3A1328%3A156%7Cm00747%3A752%3A131%7Cm01189%3A0%3A3%7Cm00775%3A32%3A128%7Cm01190%3A0%3A917
 m00392%3A0%3A2505%7Cm00062%3A4752%3A147%7Cm00393%3A0%3A232%7Cm00352%3A2656%3A102%7Cm00394%3A0%3A2788
 m00421%3A0%3A5521
 m00389%3A0%3A1321%7Cm00352%3A4912%3A98%7Cm00390%3A0%3A2643%7Cm00352%3A4912%3A97%7Cm00391%3A0%3A1638
 m00499%3A0%3A1197%7Cm00052%3A1408%3A403%7Cm00500%3A0%3A2216%7Cm00427%3A1184%3A243%7Cm00501%3A0%3A777
 m01033%3A0%3A103%7Cm00656%3A112%3A154%7Cm01034%3A0%3A2320
 m00352%3A0%3A108%7Cm00641%3A0%3A600%7Cm00374%3A32%3A106%7Cm00642%3A0%3A3150
-m01563%3A0%3A48%7Cm01424%3A48%3A137%7Cm01564%3A0%3A1035
-m01571%3A0%3A94%7Cm00993%3A208%3A97%7Cm01572%3A0%3A608%7Cm01564%3A608%3A105%7Cm01573%3A0%3A45%7Cm01564%3A768%3A98%7Cm01574%3A0%3A158
-m01703%3A0%3A88%7Cm01404%3A112%3A100%7Cm01704%3A0%3A819
-m01331%3A0%3A350%7Cm00993%3A208%3A97%7Cm01332%3A0%3A681%7Cm01308%3A576%3A116%7Cm01333%3A0%3A454
-m01331%3A0%3A240%7Cm01356%3A0%3A112%7Cm00993%3A208%3A97%7Cm01332%3A0%3A233%7Cm01357%3A0%3A168%7Cm01332%3A416%3A181%7Cm01358%3A0%3A79%7Cm01308%3A576%3A116%7Cm01333%3A0%3A106%7Cm01359%3A0%3A325
-m01056%3A0%3A2518
+m01561%3A0%3A48%7Cm01422%3A48%3A137%7Cm01562%3A0%3A1035
+m01569%3A0%3A94%7Cm00993%3A208%3A97%7Cm01570%3A0%3A608%7Cm01562%3A608%3A105%7Cm01571%3A0%3A45%7Cm01562%3A768%3A98%7Cm01572%3A0%3A158
+m01701%3A0%3A88%7Cm01402%3A112%3A100%7Cm01702%3A0%3A819
+m01329%3A0%3A350%7Cm00993%3A208%3A97%7Cm01330%3A0%3A681%7Cm01306%3A576%3A116%7Cm01331%3A0%3A454
+m01329%3A0%3A240%7Cm01354%3A0%3A112%7Cm00993%3A208%3A97%7Cm01330%3A0%3A233%7Cm01355%3A0%3A168%7Cm01330%3A416%3A181%7Cm01356%3A0%3A79%7Cm01306%3A576%3A116%7Cm01331%3A0%3A106%7Cm01357%3A0%3A325
+m01054%3A0%3A2518
 m00352%3A0%3A108%7Cm00373%3A0%3A822%7Cm00062%3A2480%3A99%7Cm00374%3A0%3A5007
 m00863%3A0%3A256%7Cm00062%3A2480%3A107%7Cm00864%3A0%3A298%7Cm00469%3A160%3A97%7Cm00865%3A0%3A2303
 m01050%3A0%3A325%7Cm00216%3A896%3A146%7Cm01051%3A0%3A2074
-m00863%3A0%3A141%7Cm01392%3A0%3A47%7Cm00993%3A192%3A130%7Cm01393%3A0%3A748%7Cm00475%3A4448%3A118%7Cm01394%3A0%3A356
-m01724%3A0%3A990
+m00863%3A0%3A141%7Cm01390%3A0%3A47%7Cm00993%3A192%3A130%7Cm01391%3A0%3A748%7Cm00475%3A4448%3A118%7Cm01392%3A0%3A356
+m01722%3A0%3A990
 m00809%3A0%3A3176
 m00055%3A0%3A104%7Cm00870%3A0%3A244%7Cm00583%3A16%3A145%7Cm00871%3A0%3A189%7Cm00475%3A560%3A112%7Cm00872%3A0%3A78%7Cm00584%3A96%3A116%7Cm00873%3A0%3A764%7Cm00865%3A1936%3A123%7Cm00874%3A0%3A1067%7Cm00584%3A3248%3A112
-m01644%3A0%3A119%7Cm01626%3A80%3A106%7Cm01645%3A0%3A82%7Cm01069%3A128%3A105%7Cm01646%3A0%3A674
+m01642%3A0%3A119%7Cm01624%3A80%3A106%7Cm01643%3A0%3A82%7Cm01067%3A128%3A105%7Cm01644%3A0%3A674
 m00275%3A0%3A120%7Cm00931%3A0%3A2500%7Cm00878%3A304%3A123%7Cm00932%3A0%3A170
 m00143%3A0%3A112%7Cm00395%3A0%3A178%7Cm00143%3A304%3A132%7Cm00396%3A0%3A1017%7Cm00149%3A512%3A98%7Cm00397%3A0%3A3905%7Cm00056%3A10864%3A103%7Cm00398%3A0%3A70
 m00059%3A0%3A119%7Cm00291%3A0%3A219%7Cm00073%3A192%3A123%7Cm00292%3A0%3A732%7Cm00073%3A2480%3A122%7Cm00293%3A0%3A357%7Cm00073%3A2848%3A118%7Cm00294%3A0%3A1984%7Cm00073%3A4048%3A112%7Cm00295%3A0%3A3522%7Cm00073%3A10928%3A118
@@ -6680,54 +7343,54 @@ m00657%3A0%3A119%7Cm00722%3A0%3A3381%7Cm00056%3A10864%3A103%7Cm00061%3A0%3A47
 m00999%3A0%3A2171%7Cm00464%3A1152%3A121%7Cm01000%3A0%3A149%7Cm00901%3A144%3A135%7Cm01001%3A0%3A76
 m00271%3A0%3A130%7Cm00548%3A0%3A24%7Cm00471%3A0%3A169%7Cm01015%3A0%3A1484%7Cm00473%3A3248%3A110%7Cm01016%3A0%3A23%7Cm00931%3A2016%3A97%7Cm01017%3A0%3A41%7Cm00901%3A0%3A131%7Cm01018%3A0%3A9%7Cm00830%3A2368%3A105%7Cm01019%3A0%3A285
 m00055%3A0%3A104%7Cm00585%3A0%3A298%7Cm00062%3A7936%3A212%7Cm00586%3A0%3A338%7Cm00237%3A560%3A131%7Cm00587%3A0%3A257%7Cm00424%3A864%3A116%7Cm00588%3A0%3A2620%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
-m00271%3A0%3A130%7Cm01120%3A0%3A32%7Cm00332%3A0%3A99%7Cm01121%3A0%3A1584%7Cm00464%3A1152%3A121%7Cm01030%3A0%3A3%7Cm00464%3A1280%3A135%7Cm01122%3A0%3A33%7Cm00274%3A560%3A133%7Cm01123%3A0%3A37
+m00271%3A0%3A130%7Cm01118%3A0%3A32%7Cm00332%3A0%3A99%7Cm01119%3A0%3A1584%7Cm00464%3A1152%3A121%7Cm01030%3A0%3A3%7Cm00464%3A1280%3A135%7Cm01120%3A0%3A33%7Cm00274%3A560%3A133%7Cm01121%3A0%3A37
 m00059%3A0%3A119%7Cm00756%3A0%3A199%7Cm00387%3A80%3A159%7Cm00757%3A0%3A104%7Cm00388%3A992%3A172%7Cm00758%3A0%3A1809%7Cm00295%3A2496%3A158%7Cm00759%3A0%3A194%7Cm00295%3A2960%3A251%7Cm00760%3A0%3A16%7Cm00295%3A3232%3A99%7Cm00761%3A0%3A166%7Cm00388%3A5088%3A105
 m00900%3A0%3A2606%7Cm00464%3A1168%3A105%7Cm00901%3A0%3A306
 m00055%3A0%3A104%7Cm00395%3A0%3A101%7Cm01006%3A0%3A71%7Cm00055%3A1008%3A107%7Cm01007%3A0%3A33%7Cm00586%3A208%3A119%7Cm01008%3A0%3A593%7Cm00397%3A592%3A119%7Cm01009%3A0%3A46%7Cm00397%3A800%3A181%7Cm01010%3A0%3A532%7Cm00397%3A3280%3A152%7Cm01011%3A0%3A306%7Cm00056%3A10864%3A137%7Cm00589%3A0%3A31
 m00055%3A0%3A104%7Cm00691%3A0%3A280%7Cm00143%3A320%3A103%7Cm00692%3A0%3A11%7Cm00062%3A7936%3A133%7Cm00693%3A0%3A100%7Cm00586%3A0%3A175%7Cm00694%3A0%3A2860
 m00275%3A0%3A120%7Cm00885%3A0%3A865%7Cm00590%3A2224%3A102%7Cm00886%3A0%3A128%7Cm00545%3A48%3A96%7Cm00887%3A0%3A1010%7Cm00755%3A2928%3A107%7Cm00888%3A0%3A312%7Cm00519%3A2336%3A133%7Cm00889%3A0%3A166
-m01408%3A0%3A789%7Cm00396%3A96%3A99%7Cm01409%3A0%3A184%7Cm01088%3A96%3A105%7Cm01410%3A0%3A46%7Cm00464%3A1168%3A102%7Cm01411%3A0%3A181
+m01406%3A0%3A789%7Cm00396%3A96%3A99%7Cm01407%3A0%3A184%7Cm01086%3A96%3A105%7Cm01408%3A0%3A46%7Cm00464%3A1168%3A102%7Cm01409%3A0%3A181
 m00055%3A0%3A104%7Cm00814%3A0%3A242%7Cm00377%3A1440%3A112%7Cm00815%3A0%3A2536%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
-m00631%3A0%3A102%7Cm01383%3A0%3A1008%7Cm01075%3A1920%3A118%7Cm01384%3A0%3A141%7Cm00710%3A656%3A131%7Cm01385%3A0%3A57
-m01331%3A0%3A99%7Cm01685%3A0%3A59%7Cm01201%3A1472%3A97%7Cm01686%3A0%3A585%7Cm01515%3A272%3A185%7Cm01687%3A0%3A7
-m00696%3A0%3A113%7Cm01342%3A0%3A584%7Cm00508%3A3376%3A164%7Cm01343%3A0%3A442%7Cm00508%3A3824%3A107%7Cm01344%3A0%3A23%7Cm00508%3A3952%3A176%7Cm01345%3A0%3A60
+m00631%3A0%3A102%7Cm01381%3A0%3A1008%7Cm01073%3A1920%3A118%7Cm01382%3A0%3A141%7Cm00710%3A656%3A131%7Cm01383%3A0%3A57
+m01329%3A0%3A99%7Cm01683%3A0%3A59%7Cm01199%3A1472%3A97%7Cm01684%3A0%3A585%7Cm01513%3A272%3A185%7Cm01685%3A0%3A7
+m00696%3A0%3A113%7Cm01340%3A0%3A584%7Cm00508%3A3376%3A164%7Cm01341%3A0%3A442%7Cm00508%3A3824%3A107%7Cm01342%3A0%3A23%7Cm00508%3A3952%3A176%7Cm01343%3A0%3A60
 m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm00632%3A0%3A14%7Cm00583%3A16%3A145%7Cm00633%3A0%3A141%7Cm00583%3A320%3A105%7Cm00237%3A560%3A150%7Cm00634%3A0%3A637%7Cm00584%3A672%3A254%7Cm00635%3A0%3A60%7Cm00584%3A1008%3A179%7Cm00636%3A0%3A305%7Cm00777%3A0%3A9%7Cm00636%3A1008%3A961%7Cm00788%3A0%3A4
 m00631%3A0%3A102%7Cm00569%3A0%3A95%7Cm00559%3A96%3A142%7Cm00632%3A0%3A14%7Cm00583%3A16%3A145%7Cm00633%3A0%3A141%7Cm00583%3A320%3A105%7Cm00237%3A560%3A150%7Cm00634%3A0%3A637%7Cm00584%3A672%3A254%7Cm00635%3A0%3A60%7Cm00584%3A1008%3A179%7Cm00636%3A0%3A108%7Cm00776%3A0%3A105%7Cm00636%3A112%3A193%7Cm00777%3A0%3A9%7Cm00636%3A1008%3A961%7Cm00778%3A0%3A6
-m01175%3A0%3A2153
-m01513%3A0%3A264%7Cm01201%3A1472%3A97%7Cm01514%3A0%3A264%7Cm00374%3A3040%3A102%7Cm01082%3A1760%3A98%7Cm01515%3A0%3A483
+m01173%3A0%3A2153
+m01511%3A0%3A264%7Cm01199%3A1472%3A97%7Cm01512%3A0%3A264%7Cm00374%3A3040%3A102%7Cm01080%3A1760%3A98%7Cm01513%3A0%3A483
 m01045%3A0%3A13%7Cm00816%3A16%3A112%7Cm01046%3A0%3A342%7Cm00965%3A400%3A289%7Cm01047%3A0%3A1087%7Cm00816%3A2144%3A110%7Cm01048%3A0%3A198%7Cm00816%3A2384%3A122%7Cm01049%3A0%3A274
 m00631%3A0%3A102%7Cm00965%3A0%3A1630%7Cm00237%3A544%3A97%7Cm00966%3A0%3A250%7Cm00816%3A2144%3A110%7Cm00967%3A0%3A573
 m00631%3A0%3A102%7Cm00940%3A0%3A2565%7Cm00542%3A624%3A149%7Cm00941%3A0%3A45
 m00543%3A0%3A356%7Cm00518%3A80%3A103%7Cm00544%3A0%3A218%7Cm00518%3A704%3A307%7Cm00545%3A0%3A238%7Cm00167%3A1472%3A115%7Cm00546%3A0%3A2686%7Cm00519%3A2336%3A133%7Cm00547%3A0%3A194
 m00055%3A0%3A104%7Cm00582%3A0%3A94%7Cm00559%3A96%3A142%7Cm00583%3A0%3A425%7Cm00237%3A560%3A150%7Cm00584%3A0%3A3360
 m00055%3A0%3A104%7Cm01002%3A0%3A64%7Cm00377%3A1440%3A114%7Cm00692%3A0%3A11%7Cm00062%3A7936%3A133%7Cm00693%3A0%3A100%7Cm00586%3A0%3A175%7Cm01003%3A0%3A1951
-m00631%3A0%3A102%7Cm00870%3A0%3A234%7Cm01243%3A0%3A705%7Cm00475%3A4512%3A123%7Cm01244%3A0%3A251%7Cm00205%3A112%3A100%7Cm01245%3A0%3A388
-m01207%3A0%3A2000
+m00631%3A0%3A102%7Cm00870%3A0%3A234%7Cm01241%3A0%3A705%7Cm00475%3A4512%3A123%7Cm01242%3A0%3A251%7Cm00205%3A112%3A100%7Cm01243%3A0%3A388
+m01205%3A0%3A2000
 m00055%3A0%3A104%7Cm00974%3A0%3A2642
-m01825%3A0%3A836
-m00993%3A0%3A139%7Cm01595%3A0%3A1029
-m01784%3A0%3A910
-m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01386%3A0%3A747%7Cm00003%3A2640%3A100%7Cm01387%3A0%3A531
-m01071%3A0%3A86%7Cm00220%3A80%3A112%7Cm00521%3A0%3A139%7Cm01072%3A0%3A761%7Cm00524%3A32%3A99%7Cm01073%3A0%3A931%7Cm00834%3A2496%3A119%7Cm01074%3A0%3A250
-m00527%3A0%3A1655%7Cm00001%3A14448%3A199%7Cm00528%3A0%3A2610
-m01447%3A0%3A16%7Cm01428%3A16%3A345%7Cm01449%3A0%3A42%7Cm01428%3A448%3A109%7Cm00125%3A272%3A99%7Cm01429%3A0%3A807%7Cm00096%3A0%3A2
-m01941%3A0%3A630
-m00055%3A0%3A104%7Cm01277%3A0%3A1337%7Cm00940%3A2224%3A101%7Cm01278%3A0%3A51%7Cm00542%3A624%3A123%7Cm01279%3A0%3A126
+m01823%3A0%3A836
+m00993%3A0%3A139%7Cm01593%3A0%3A1029
+m01782%3A0%3A910
+m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01384%3A0%3A747%7Cm00003%3A2640%3A100%7Cm01385%3A0%3A531
+m01069%3A0%3A86%7Cm00220%3A80%3A112%7Cm00521%3A0%3A139%7Cm01070%3A0%3A761%7Cm00524%3A32%3A99%7Cm01071%3A0%3A931%7Cm00834%3A2496%3A119%7Cm01072%3A0%3A250
+m00527%3A0%3A1655%7Cm00002%3A14448%3A199%7Cm00528%3A0%3A2610
+m01445%3A0%3A16%7Cm01426%3A16%3A345%7Cm01447%3A0%3A42%7Cm01426%3A448%3A109%7Cm00125%3A272%3A99%7Cm01427%3A0%3A807%7Cm00096%3A0%3A2
+m01939%3A0%3A630
+m00055%3A0%3A104%7Cm01275%3A0%3A1337%7Cm00940%3A2224%3A101%7Cm01276%3A0%3A51%7Cm00542%3A624%3A123%7Cm01277%3A0%3A126
 m00631%3A0%3A102%7Cm00559%3A0%3A238%7Cm00632%3A0%3A14%7Cm00583%3A16%3A145%7Cm00633%3A0%3A141%7Cm00583%3A320%3A105%7Cm00237%3A560%3A150%7Cm00634%3A0%3A637%7Cm00584%3A672%3A254%7Cm00635%3A0%3A60%7Cm00584%3A1008%3A179%7Cm00636%3A0%3A305%7Cm00777%3A0%3A9%7Cm00636%3A1008%3A961%7Cm00096%3A0%3A2
 m00631%3A0%3A102%7Cm00559%3A0%3A238%7Cm00632%3A0%3A14%7Cm00583%3A16%3A145%7Cm00633%3A0%3A141%7Cm00583%3A320%3A105%7Cm00237%3A560%3A150%7Cm00634%3A0%3A637%7Cm00584%3A672%3A254%7Cm00635%3A0%3A60%7Cm00584%3A1008%3A179%7Cm00636%3A0%3A1969
-m01447%3A0%3A16%7Cm01428%3A16%3A345%7Cm01448%3A0%3A33%7Cm01428%3A432%3A125%7Cm00125%3A272%3A99%7Cm01429%3A0%3A805
-m01428%3A0%3A557%7Cm00125%3A272%3A99%7Cm01429%3A0%3A807
-m01826%3A0%3A828
+m01445%3A0%3A16%7Cm01426%3A16%3A345%7Cm01446%3A0%3A33%7Cm01426%3A432%3A125%7Cm00125%3A272%3A99%7Cm01427%3A0%3A805
+m01426%3A0%3A557%7Cm00125%3A272%3A99%7Cm01427%3A0%3A807
+m01824%3A0%3A828
 m00848%3A0%3A160%7Cm00829%3A160%3A121%7Cm00849%3A0%3A141%7Cm00830%3A48%3A116%7Cm00850%3A0%3A27%7Cm00830%3A192%3A163%7Cm00851%3A0%3A12%7Cm00830%3A368%3A124%7Cm00852%3A0%3A98%7Cm00830%3A592%3A416%7Cm00853%3A0%3A220%7Cm00830%3A1232%3A151%7Cm00854%3A0%3A292%7Cm00830%3A1680%3A160%7Cm00855%3A0%3A15%7Cm00830%3A1856%3A134%7Cm00856%3A0%3A8%7Cm00830%3A2000%3A131%7Cm00857%3A0%3A12%7Cm00830%3A2144%3A154%7Cm00858%3A0%3A48%7Cm00830%3A2352%3A359%7Cm00035%3A0%3A1
 m00660%3A0%3A484%7Cm00066%3A2384%3A100%7Cm00661%3A0%3A3284
 m00507%3A0%3A125%7Cm00801%3A0%3A224%7Cm00590%3A2144%3A194%7Cm00802%3A0%3A24%7Cm00590%3A2368%3A173%7Cm00803%3A0%3A11%7Cm00590%3A496%3A116%7Cm00804%3A0%3A836%7Cm00590%3A2544%3A126%7Cm00805%3A0%3A774%7Cm00590%3A3280%3A148%7Cm00806%3A0%3A203%7Cm00519%3A2336%3A104%7Cm00807%3A0%3A166
 m00631%3A0%3A102%7Cm00571%3A0%3A97%7Cm00559%3A96%3A142%7Cm00632%3A0%3A14%7Cm00583%3A16%3A145%7Cm00633%3A0%3A141%7Cm00583%3A320%3A105%7Cm00237%3A560%3A150%7Cm00634%3A0%3A637%7Cm00584%3A672%3A254%7Cm00635%3A0%3A60%7Cm00584%3A1008%3A179%7Cm00636%3A0%3A318%7Cm00719%3A0%3A136%7Cm00636%3A512%3A487%7Cm00720%3A0%3A13%7Cm00636%3A1248%3A326%7Cm00721%3A0%3A11%7Cm00636%3A1616%3A351
-m01213%3A0%3A244%7Cm00352%3A256%3A101%7Cm01214%3A0%3A956%7Cm00935%3A800%3A97%7Cm01215%3A0%3A585
-m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01690%3A0%3A449%7Cm00003%3A2640%3A100%7Cm01691%3A0%3A195%7Cm01655%3A128%3A101%7Cm01692%3A0%3A11
-m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01740%3A0%3A787
-m01437%3A0%3A14%7Cm00993%3A16%3A123%7Cm01438%3A0%3A10%7Cm00993%3A160%3A252%7Cm01439%3A0%3A288%7Cm01393%3A320%3A142%7Cm01440%3A0%3A90%7Cm01393%3A560%3A150%7Cm01441%3A0%3A32%7Cm00995%3A560%3A137%7Cm01442%3A0%3A210
+m01211%3A0%3A244%7Cm00352%3A256%3A101%7Cm01212%3A0%3A956%7Cm00935%3A800%3A97%7Cm01213%3A0%3A585
+m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01688%3A0%3A449%7Cm00003%3A2640%3A100%7Cm01689%3A0%3A195%7Cm01653%3A128%3A101%7Cm01690%3A0%3A11
+m00866%3A0%3A64%7Cm00216%3A240%3A110%7Cm01738%3A0%3A787
+m01435%3A0%3A14%7Cm00993%3A16%3A123%7Cm01436%3A0%3A10%7Cm00993%3A160%3A252%7Cm01437%3A0%3A288%7Cm01391%3A320%3A142%7Cm01438%3A0%3A90%7Cm01391%3A560%3A150%7Cm01439%3A0%3A32%7Cm00995%3A560%3A137%7Cm01440%3A0%3A210
 m00833%3A0%3A27%7Cm00216%3A240%3A110%7Cm00467%3A0%3A140%7Cm00834%3A0%3A2816
-m00055%3A0%3A104%7Cm01075%3A0%3A2220%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
+m00055%3A0%3A104%7Cm01073%3A0%3A2220%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
 m00055%3A0%3A104%7Cm00585%3A0%3A157%7Cm00915%3A0%3A38%7Cm00336%3A288%3A105%7Cm00916%3A0%3A34%7Cm00586%3A208%3A130%7Cm00237%3A560%3A131%7Cm00917%3A0%3A1089%7Cm00588%3A96%3A124%7Cm00918%3A0%3A323%7Cm00588%3A144%3A111%7Cm00919%3A0%3A193%7Cm00588%3A2400%3A123%7Cm00920%3A0%3A114%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
 m00271%3A0%3A185%7Cm00471%3A0%3A554%7Cm00424%3A704%3A126%7Cm00472%3A0%3A204%7Cm00461%3A336%3A137%7Cm00473%3A0%3A3390%7Cm00424%3A4768%3A131%7Cm00474%3A0%3A306
 m00055%3A0%3A104%7Cm00859%3A0%3A85%7Cm00315%3A96%3A109%7Cm00860%3A0%3A15%7Cm00816%3A2144%3A110%7Cm00861%3A0%3A181%7Cm00318%3A80%3A167%7Cm00862%3A0%3A2123%7Cm00056%3A10864%3A137%7Cm00589%3A0%3A31
@@ -6735,29 +7398,29 @@ m00284%3A0%3A18%7Cm00271%3A16%3A169%7Cm00424%3A0%3A181%7Cm00460%3A0%3A106%7Cm004
 m00271%3A0%3A185%7Cm00471%3A0%3A501%7Cm00476%3A0%3A47%7Cm00424%3A704%3A126%7Cm00477%3A0%3A87%7Cm00424%3A864%3A116%7Cm00478%3A0%3A93%7Cm00461%3A336%3A137%7Cm00479%3A0%3A176%7Cm00424%3A1472%3A177%7Cm00480%3A0%3A613%7Cm00461%3A608%3A98%7Cm00481%3A0%3A106%7Cm00424%3A2880%3A213%7Cm00482%3A0%3A217%7Cm00473%3A2256%3A306%7Cm00483%3A0%3A72%7Cm00424%3A3680%3A130%7Cm00484%3A0%3A273%7Cm00473%3A1488%3A145%7Cm00485%3A0%3A608%7Cm00473%3A3232%3A126%7Cm00486%3A0%3A32%7Cm00424%3A4768%3A131%7Cm00487%3A0%3A4%7Cm00474%3A0%3A114%7Cm00488%3A0%3A172
 m00271%3A0%3A130%7Cm00548%3A0%3A24%7Cm00471%3A0%3A186%7Cm00549%3A0%3A5%7Cm00471%3A192%3A135%7Cm00550%3A0%3A197%7Cm00424%3A704%3A152%7Cm00551%3A0%3A82%7Cm00461%3A336%3A133%7Cm00552%3A0%3A720%7Cm00473%3A192%3A117%7Cm00553%3A0%3A499%7Cm00473%3A992%3A117%7Cm00554%3A0%3A204%7Cm00473%3A2256%3A176%7Cm00555%3A0%3A6%7Cm00473%3A2432%3A324%7Cm00556%3A0%3A566%7Cm00473%3A3232%3A126%7Cm00557%3A0%3A32%7Cm00424%3A4768%3A131%7Cm00558%3A0%3A261
 m00271%3A0%3A185%7Cm00424%3A0%3A5242
-m00055%3A0%3A104%7Cm01097%3A0%3A316%7Cm00377%3A1440%3A112%7Cm01098%3A0%3A1731%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
-m01331%3A0%3A99%7Cm01596%3A0%3A1069
-m01561%3A0%3A123%7Cm01013%3A1344%3A96%7Cm01562%3A0%3A1004
-m01296%3A0%3A21%7Cm00392%3A16%3A101%7Cm01297%3A0%3A1692
-m01916%3A0%3A62%7Cm01835%3A16%3A106%7Cm01917%3A0%3A8%7Cm00834%3A2496%3A119%7Cm01918%3A0%3A372
-m00216%3A0%3A150%7Cm01421%3A0%3A400%7Cm00216%3A896%3A132%7Cm01422%3A0%3A140%7Cm00834%3A2496%3A119%7Cm01423%3A0%3A541
+m00055%3A0%3A104%7Cm01095%3A0%3A316%7Cm00377%3A1440%3A112%7Cm01096%3A0%3A1731%7Cm00386%3A32%3A140%7Cm00589%3A0%3A31
+m01329%3A0%3A99%7Cm01594%3A0%3A1069
+m01559%3A0%3A123%7Cm01013%3A1344%3A96%7Cm01560%3A0%3A1004
+m01294%3A0%3A21%7Cm00392%3A16%3A101%7Cm01295%3A0%3A1692
+m01914%3A0%3A62%7Cm01833%3A16%3A106%7Cm01915%3A0%3A8%7Cm00834%3A2496%3A119%7Cm01916%3A0%3A372
+m00216%3A0%3A150%7Cm01419%3A0%3A400%7Cm00216%3A896%3A132%7Cm01420%3A0%3A140%7Cm00834%3A2496%3A119%7Cm01421%3A0%3A541
 m00164%3A0%3A106%7Cm00518%3A0%3A1715%7Cm00003%3A2640%3A100%7Cm00519%3A0%3A2636
 m00507%3A0%3A380%7Cm00151%3A80%3A97%7Cm00508%3A0%3A4237
 m00875%3A0%3A19%7Cm00682%3A16%3A153%7Cm00876%3A0%3A1179%7Cm00052%3A3504%3A99%7Cm00877%3A0%3A998%7Cm00755%3A2928%3A107%7Cm00878%3A0%3A499
 m00379%3A0%3A166%7Cm00529%3A0%3A123%7Cm00379%3A368%3A108%7Cm00530%3A0%3A2%7Cm00151%3A80%3A97%7Cm00531%3A0%3A3956
-m00682%3A0%3A297%7Cm01469%3A0%3A377%7Cm00764%3A176%3A102%7Cm01470%3A0%3A164%7Cm01088%3A96%3A105%7Cm01471%3A0%3A157%7Cm00546%3A2160%3A101%7Cm01472%3A0%3A71
-m00933%3A0%3A97%7Cm01390%3A0%3A135%7Cm01803%3A0%3A652
-m01605%3A0%3A18%7Cm00216%3A240%3A110%7Cm01606%3A0%3A1028
-m01951%3A0%3A100%7Cm01404%3A112%3A100%7Cm01952%3A0%3A411
-m01398%3A0%3A1536
+m00682%3A0%3A297%7Cm01467%3A0%3A377%7Cm00764%3A176%3A102%7Cm01468%3A0%3A164%7Cm01086%3A96%3A105%7Cm01469%3A0%3A157%7Cm00546%3A2160%3A101%7Cm01470%3A0%3A71
+m00933%3A0%3A97%7Cm01388%3A0%3A135%7Cm01801%3A0%3A652
+m01603%3A0%3A18%7Cm00216%3A240%3A110%7Cm01604%3A0%3A1028
+m01949%3A0%3A100%7Cm01402%3A112%3A100%7Cm01950%3A0%3A411
+m01396%3A0%3A1536
 m00829%3A0%3A281%7Cm00214%3A448%3A104%7Cm00830%3A0%3A2713
-m01220%3A0%3A120%7Cm01144%3A0%3A111%7Cm01401%3A0%3A185%7Cm01209%3A80%3A130%7Cm01402%3A0%3A572%7Cm01144%3A1216%3A105%7Cm01403%3A0%3A311
-m02066%3A0%3A326
-m01831%3A0%3A32%7Cm02066%3A32%3A141%7Cm02067%3A0%3A19%7Cm02066%3A192%3A122%7Cm02068%3A0%3A12
-m01831%3A0%3A32%7Cm02066%3A32%3A142%7Cm02069%3A0%3A17%7Cm02066%3A192%3A123%7Cm02070%3A0%3A10
-m02041%3A0%3A63%7Cm01144%3A0%3A115%7Cm02044%3A0%3A217
+m01218%3A0%3A120%7Cm01142%3A0%3A111%7Cm01399%3A0%3A185%7Cm01207%3A80%3A130%7Cm01400%3A0%3A572%7Cm01142%3A1216%3A105%7Cm01401%3A0%3A311
+m02064%3A0%3A326
+m01829%3A0%3A32%7Cm02064%3A32%3A141%7Cm02065%3A0%3A19%7Cm02064%3A192%3A122%7Cm02066%3A0%3A12
+m01829%3A0%3A32%7Cm02064%3A32%3A142%7Cm02067%3A0%3A17%7Cm02064%3A192%3A123%7Cm02068%3A0%3A10
+m02039%3A0%3A63%7Cm01142%3A0%3A115%7Cm02042%3A0%3A217
+"#target aftereffects\r\n/* Read-only, incremental inventories used by Codex Bridge. No project mutations. *\/\r\n(function () {\r\n    function stringify(value) {\r\n        var i, parts = [], key;\r\n        if (value === null || typeof value === \"undefined\") { return \"null\"; }\r\n        if (typeof value === \"string\") {\r\n            return '\"' + value.replace(/[\\\\\"\\x00-\\x1f]/g, function (c) {\r\n                var n = c.charCodeAt(0).toString(16);\r\n                if (c === \"\\\\\") { return \"\\\\\\\\\"; }\r\n                if (c === '\"') { return '\\\\\"'; }\r\n                while (n.length < 4) { n = \"0\" + n; }\r\n                return \"\\\\u\" + n;\r\n            }) + '\"';\r\n        }\r\n        if (typeof value === \"number\") { return isFinite(value) ? String(value) : \"null\"; }\r\n        if (typeof value === \"boolean\") { return value ? \"true\" : \"false\"; }\r\n        if (value instanceof Array) {\r\n            for (i = 0; i < value.length; i += 1) { parts.push(stringify(value[i])); }\r\n            return \"[\" + parts.join(\",\") + \"]\";\r\n        }\r\n        for (key in value) {\r\n            if (value.hasOwnProperty(key)) { parts.push(stringify(key) + \":\" + stringify(value[key])); }\r\n        }\r\n        return \"{\" + parts.join(\",\") + \"}\";\r\n    }\r\n\r\n    // External status/config is data only: never eval JSON or shell fragments.\r\n    function parseJson(text) {\r\n        var at = 0;\r\n        function space() { while (at < text.length && /\\s/.test(text.charAt(at))) { at += 1; } }\r\n        function fail() { throw new Error(\"Invalid library JSON at \" + at); }\r\n        function string() {\r\n            var out = \"\", c, hex;\r\n            at += 1;\r\n            while (at < text.length) {\r\n                c = text.charAt(at++);\r\n                if (c === '\"') { return out; }\r\n                if (c.charCodeAt(0) < 32) { fail(); }\r\n                if (c === \"\\\\\") {\r\n                    c = text.charAt(at++);\r\n                    if (c === \"u\") {\r\n                        hex = text.substr(at, 4);\r\n                        if (!/^[0-9a-fA-F]{4}$/.test(hex)) { fail(); }\r\n                        out += String.fromCharCode(parseInt(hex, 16)); at += 4;\r\n                    } else if (c === \"n\") { out += \"\\n\"; }\r\n                    else if (c === \"r\") { out += \"\\r\"; }\r\n                    else if (c === \"t\") { out += \"\\t\"; }\r\n                    else if (c === \"b\") { out += \"\\b\"; }\r\n                    else if (c === \"f\") { out += \"\\f\"; }\r\n                    else if (c === '\"' || c === \"\\\\\" || c === \"/\") { out += c; }\r\n                    else { fail(); }\r\n                } else { out += c; }\r\n            }\r\n            fail();\r\n        }\r\n        function value(depth) {\r\n            var c, out, key, number;\r\n            if (depth > 30) { fail(); }\r\n            space(); c = text.charAt(at);\r\n            if (c === '\"') { return string(); }\r\n            if (c === \"{\" || c === \"[\") {\r\n                at += 1; out = c === \"{\" ? {} : []; space();\r\n                if (text.charAt(at) === (c === \"{\" ? \"}\" : \"]\")) { at += 1; return out; }\r\n                while (at < text.length) {\r\n                    if (c === \"{\") {\r\n                        if (text.charAt(at) !== '\"') { fail(); }\r\n                        key = string();\r\n                        if (key === \"__proto__\" || key === \"constructor\" || key === \"prototype\" || key === \"hasOwnProperty\" || out.hasOwnProperty(key)) { fail(); }\r\n                        space(); if (text.charAt(at++) !== \":\") { fail(); }\r\n                        out[key] = value(depth + 1);\r\n                    } else { out.push(value(depth + 1)); }\r\n                    space();\r\n                    if (text.charAt(at) === (c === \"{\" ? \"}\" : \"]\")) { at += 1; return out; }\r\n                    if (text.charAt(at++) !== \",\") { fail(); }\r\n                    space();\r\n                }\r\n                fail();\r\n            }\r\n            if (text.substr(at, 4) === \"true\") { at += 4; return true; }\r\n            if (text.substr(at, 5) === \"false\") { at += 5; return false; }\r\n            if (text.substr(at, 4) === \"null\") { at += 4; return null; }\r\n            number = text.substr(at).match(/^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);\r\n            if (number) { at += number[0].length; out = Number(number[0]); if (!isFinite(out)) { fail(); } return out; }\r\n            fail();\r\n        }\r\n        var result = value(0); space(); if (at !== text.length) { fail(); } return result;\r\n    }\r\n    function readJson(path) {\r\n        var f = new File(path), data;\r\n        if (!f.exists) { return null; }\r\n        if (f.length > 262144) { throw new Error(\"Library metadata exceeds size limit\"); }\r\n        f.encoding = \"UTF-8\";\r\n        if (!f.open(\"r\")) { throw new Error(\"Cannot read library metadata: \" + path); }\r\n        try { data = f.read(); } finally { f.close(); }\r\n        return parseJson(data.replace(/^\\uFEFF/, \"\"));\r\n    }\r\n    function clean(value) { return String(value).replace(/[\\t\\r\\n]/g, \" \"); }\r\n    function catalogPath(status) {\r\n        var session = status.catalogSessionId || status.sessionId, request = status.catalogRequestId || status.requestId;\r\n        if (typeof session !== \"string\" || !/^[A-Za-z0-9-]{8,80}$/.test(session) ||\r\n                typeof request !== \"string\" || !/^[A-Za-z0-9-]{8,80}$/.test(request)) { throw new Error(\"Invalid SFX catalog identity\"); }\r\n        var expected = \".ae-codex/library/sessions/\" + session + \"/sfx-\" + request + \".jsonl\";\r\n        if (status.catalogRelativePath !== expected) { throw new Error(\"Invalid SFX catalog path\"); }\r\n        return expected;\r\n    }\r\n    function safeValue(p) {\r\n        try {\r\n            if (p.propertyValueType === PropertyValueType.CUSTOM_VALUE || p.propertyValueType === PropertyValueType.NO_VALUE) { return \"\"; }\r\n            return clean(p.value);\r\n        } catch (e) { return \"unavailable\"; }\r\n    }\r\n    function walkStep(stack, lines) {\r\n        var frame = stack[stack.length - 1], p, range = \"\";\r\n        if (frame.index > frame.group.numProperties) { stack.pop(); return; }\r\n        p = frame.group.property(frame.index++); if (!p) { return; }\r\n        if (p.propertyType === PropertyType.PROPERTY) {\r\n            try {\r\n                if (p.hasMin) { range += \"min=\" + p.minValue + \" \"; }\r\n                if (p.hasMax) { range += \"max=\" + p.maxValue; }\r\n            } catch (rangeError) { range = \"unavailable\"; }\r\n        }\r\n        lines.push(\"PARAM\\t\" + clean(frame.path) + \"\\t\" + clean(p.matchName) + \"\\t\" + clean(p.name) + \"\\t\" + p.propertyType + \"\\t\" + range + \"\\t\" + (p.propertyType === PropertyType.PROPERTY ? safeValue(p) : \"\"));\r\n        if (p.propertyType !== PropertyType.PROPERTY && frame.depth < 8) {\r\n            stack.push({ group: p, path: frame.path + \"/\" + p.matchName, index: 1, depth: frame.depth + 1 });\r\n        }\r\n    }\r\n    function count(value) { return typeof value === \"number\" && isFinite(value) && value >= 0 && value === Math.floor(value); }\r\n    function configPreferences(config) {\r\n        var result = { effectsEnabled: true, sfxEnabled: false, manualRefresh: true };\r\n        if (config === null) { return result; }\r\n        if (!config || config instanceof Array || typeof config !== \"object\" || config.schemaVersion !== 1) { throw new Error(\"Invalid library configuration\"); }\r\n        if (typeof config.effects !== \"undefined\") {\r\n            if (!config.effects || config.effects instanceof Array || typeof config.effects !== \"object\") { throw new Error(\"Invalid library effects configuration\"); }\r\n            if (typeof config.effects.enabled !== \"undefined\" && typeof config.effects.enabled !== \"boolean\") { throw new Error(\"Library effects.enabled must be a boolean\"); }\r\n            result.effectsEnabled = config.effects.enabled !== false;\r\n        }\r\n        if (typeof config.sfx !== \"undefined\") {\r\n            if (!config.sfx || config.sfx instanceof Array || typeof config.sfx !== \"object\") { throw new Error(\"Invalid library SFX configuration\"); }\r\n            if (typeof config.sfx.enabled !== \"undefined\" && typeof config.sfx.enabled !== \"boolean\") { throw new Error(\"Library sfx.enabled must be a boolean\"); }\r\n            result.sfxEnabled = config.sfx.enabled !== false;\r\n        }\r\n        return result;\r\n    }\r\n    function array(value) { return Object.prototype.toString.call(value) === \"[object Array]\"; }\r\n    function normalizeRoots(roots, allowEmpty, deduplicate) {\r\n        var result = [], seen = {}, i, path, parts, j, folder, parent, limit;\r\n        if (!array(roots) || roots.length > 32 || (!allowEmpty && !roots.length)) { throw new Error(\"Select at most 32 specific SFX folders\"); }\r\n        for (i = 0; i < roots.length; i += 1) {\r\n            if (typeof roots[i] !== \"string\" || !roots[i] || roots[i].length > 512 || /[\\x00-\\x1f<>\"|?*]/.test(roots[i]) || /^\\s|\\s$/.test(roots[i])) { throw new Error(\"Invalid SFX folder path\"); }\r\n            path = roots[i].replace(/\\\\/g, \"/\").replace(/\\/+$/, \"\");\r\n            if (/^[A-Za-z]:\\//.test(path)) {\r\n                parts = path.substr(3).split(\"/\");\r\n                if (!path.substr(3)) { throw new Error(\"Select a specific SFX folder, not a drive root\"); }\r\n            } else if (/^\\/\\/[^\\/]+\\/[^\\/]+\\//.test(path)) {\r\n                parts = path.substr(2).split(\"/\");\r\n                if (parts.length < 3) { throw new Error(\"Select a specific SFX folder, not a share root\"); }\r\n            } else { throw new Error(\"SFX folders must be absolute specific folder paths\"); }\r\n            for (j = 0; j < parts.length; j += 1) {\r\n                if (!parts[j] || parts[j] === \".\" || parts[j] === \"..\" || /[.: ]$|:/.test(parts[j]) || /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|$)/i.test(parts[j])) { throw new Error(\"Invalid SFX folder component\"); }\r\n            }\r\n            if (seen[\"$\" + path.toLowerCase()]) { if (deduplicate) { continue; } throw new Error(\"Duplicate SFX folder\"); }\r\n            seen[\"$\" + path.toLowerCase()] = true;\r\n            folder = new Folder(path);\r\n            if ((new File(path)).exists && !folder.exists) { throw new Error(\"SFX location must be a folder\"); }\r\n            limit = 0;\r\n            while (folder && limit++ < 128) {\r\n                if (folder.alias) { throw new Error(\"SFX folder aliases are not allowed\"); }\r\n                parent = folder.parent;\r\n                if (!parent || parent.fsName === folder.fsName || !parent.fsName) { break; }\r\n                folder = parent;\r\n            }\r\n            result.push(path);\r\n        }\r\n        return result;\r\n    }\r\n    function rootsKey(roots) {\r\n        var keys = [], i;\r\n        for (i = 0; i < roots.length; i += 1) { keys.push(roots[i].toLowerCase()); }\r\n        keys.sort(); return keys.join(\"\\n\");\r\n    }\r\n    function Library(bridge) {\r\n        this.bridge = bridge;\r\n        this.root = bridge.workspaceRoot + \"/.ae-codex/library\";\r\n        this.active = false; this.refreshPending = false; this.refreshSequence = 0; this.settingsSequence = 0;\r\n        this.lastRefresh = 0; this.aeDone = true; this.sfxDone = true;\r\n        this.preferences = { effectsEnabled: true, sfxEnabled: false, manualRefresh: true };\r\n        this.state = { schema: \"codex-ae-library/v1\", state: \"stopped\", effectsCount: 0, sfxCount: 0, projectAudioCount: 0, errors: [] };\r\n    }\r\n    Library.prototype.publish = function () {\r\n        this.state.timestampEpochMs = new Date().getTime();\r\n        this.bridge.writeAtomic(this.root + \"/current.json\", stringify(this.state));\r\n    };\r\n    Library.prototype.getPreferences = function () {\r\n        return { effectsEnabled: this.preferences.effectsEnabled, sfxEnabled: this.preferences.sfxEnabled, manualRefresh: true };\r\n    };\r\n    Library.prototype.loadPreferences = function () {\r\n        this.configurationError = null;\r\n        try { this.configuration = readJson(this.root + \"/config.json\"); this.preferences = configPreferences(this.configuration); }\r\n        catch (error) {\r\n            this.configurationError = \"Library config: \" + String(error);\r\n            this.preferences = { effectsEnabled: false, sfxEnabled: false, manualRefresh: true };\r\n        }\r\n        this.effectsEnabled = this.preferences.effectsEnabled; this.sfxEnabled = this.preferences.sfxEnabled;\r\n    };\r\n    Library.prototype.getSfxRoots = function () {\r\n        var config = readJson(this.root + \"/config.json\"); configPreferences(config);\r\n        return normalizeRoots(config && config.sfx && typeof config.sfx.roots !== \"undefined\" ? config.sfx.roots : [], true, true);\r\n    };\r\n    Library.prototype.cachedRootsMatch = function (cached) {\r\n        var config = this.configuration, summary, expected, roots = [], i;\r\n        if (!config || !config.sfx || config.sfx.requireRootsMatch !== true) { return true; }\r\n        if (typeof cached.sessionId !== \"string\" || !/^[A-Za-z0-9-]{8,80}$/.test(cached.sessionId) || typeof cached.requestId !== \"string\" || !/^[A-Za-z0-9-]{8,80}$/.test(cached.requestId)) { return false; }\r\n        expected = \".ae-codex/library/sessions/\" + cached.sessionId + \"/summary-sfx-\" + cached.requestId + \".json\";\r\n        if (cached.summaryRelativePath !== expected) { return false; }\r\n        summary = readJson(this.bridge.workspaceRoot + \"/\" + expected);\r\n        if (!summary || summary.schemaVersion !== 1 || summary.kind !== \"disk-sfx\" || summary.state !== \"success\" || summary.enabled === false || summary.sessionId !== cached.sessionId || summary.requestId !== cached.requestId || !array(summary.roots) || summary.roots.length > 32) { return false; }\r\n        for (i = 0; i < summary.roots.length; i += 1) { if (!summary.roots[i] || typeof summary.roots[i].path !== \"string\") { return false; } roots.push(summary.roots[i].path); }\r\n        return rootsKey(normalizeRoots(roots, true, true)) === rootsKey(normalizeRoots(config.sfx.roots || [], true, true));\r\n    };\r\n    Library.prototype.loadCached = function () {\r\n        var current, cached, relative, file;\r\n        this.cachedEffects = null; this.cachedEffectsMetadata = null; this.cachedSfx = null;\r\n        try {\r\n            cached = readJson(this.root + \"/latest-effects.json\");\r\n            current = readJson(this.root + \"/current.json\");\r\n            if (!cached) { cached = current; }\r\n            if (cached && cached.schema === \"codex-ae-library/v1\" && count(cached.effectsCount) && count(cached.projectAudioCount) && count(cached.appliedSchemaCount)) {\r\n                relative = \".ae-codex/library/sessions/\" + cached.sessionId + \"/\";\r\n                if (typeof cached.sessionId === \"string\" && /^[A-Za-z0-9-]{8,80}$/.test(cached.sessionId) &&\r\n                        typeof cached.requestId === \"string\" && /^[A-Za-z0-9-]{8,120}$/.test(cached.requestId) &&\r\n                        cached.effectsRelativePath === relative + \"effects-\" + cached.requestId + \".tsv\" &&\r\n                        cached.projectAudioRelativePath === relative + \"project-audio-\" + cached.requestId + \".json\" &&\r\n                        (new File(this.bridge.workspaceRoot + \"/\" + cached.effectsRelativePath)).exists &&\r\n                        (new File(this.bridge.workspaceRoot + \"/\" + cached.projectAudioRelativePath)).exists) {\r\n                    this.cachedEffectsMetadata = cached;\r\n                    this.cachedEffects = { effectsCount: cached.effectsCount, projectAudioCount: cached.projectAudioCount,\r\n                        appliedSchemaCount: cached.appliedSchemaCount, effectsRelativePath: cached.effectsRelativePath,\r\n                        projectAudioRelativePath: cached.projectAudioRelativePath,\r\n                        effectsTimestampEpochMs: cached.effectsTimestampEpochMs || cached.timestampEpochMs || null };\r\n                }\r\n            }\r\n        } catch (effectCacheError) { /* Reject corrupt metadata without scanning or loading catalog contents. *\/ }\r\n        try {\r\n            cached = readJson(this.root + \"/latest-sfx.json\");\r\n            if (cached && cached.schemaVersion === 1 && cached.kind === \"disk-sfx\" && cached.enabled !== false && count(cached.count)) {\r\n                relative = catalogPath(cached); file = new File(this.bridge.workspaceRoot + \"/\" + relative);\r\n                if (file.exists && this.cachedRootsMatch(cached)) {\r\n                    this.cachedSfx = { sfxRelativePath: relative, sfxCount: cached.count,\r\n                        sfxTimestampEpochMs: cached.timestampEpochMs || cached.scannedAtEpochMs || null, sfxCompletedUtc: typeof cached.completedUtc === \"string\" ? cached.completedUtc.substr(0, 80) : null };\r\n                }\r\n            }\r\n        } catch (sfxCacheError) { /* Never read a JSONL catalog into the AE process. *\/ }\r\n    };\r\n    Library.prototype.persistEffectsCache = function () {\r\n        if (this.cachedEffectsMetadata && !(new File(this.root + \"/latest-effects.json\")).exists) {\r\n            try { this.bridge.writeAtomic(this.root + \"/latest-effects.json\", stringify(this.cachedEffectsMetadata)); }\r\n            catch (cacheError) { try { this.bridge.log(\"error\", \"Library cached descriptor could not be saved: \" + String(cacheError)); } catch (ignoredLogError) {} }\r\n        }\r\n    };\r\n    Library.prototype.applyCached = function () {\r\n        var key;\r\n        this.state.manualRefresh = true; this.state.refreshMode = \"manual\";\r\n        this.state.effectsEnabled = this.effectsEnabled; this.state.sfxEnabled = this.sfxEnabled;\r\n        this.state.effectsCount = 0; this.state.projectAudioCount = 0; this.state.appliedSchemaCount = 0; this.state.sfxCount = 0;\r\n        delete this.state.effectsRelativePath; delete this.state.projectAudioRelativePath; delete this.state.effectsTimestampEpochMs;\r\n        delete this.state.sfxRelativePath; delete this.state.sfxSummaryRelativePath; delete this.state.sfxTimestampEpochMs; delete this.state.sfxCompletedUtc;\r\n        this.state.effectsCatalogCached = false; this.state.sfxCatalogCached = false; this.state.sfxCatalogReused = false;\r\n        if (!this.sfxEnabled) { delete this.state.sfxLaunchState; delete this.state.sfxWarnings; delete this.state.pendingArchiveCount; }\r\n        this.state.effectsState = this.effectsEnabled ? \"not-indexed\" : \"disabled\";\r\n        this.state.sfxState = this.sfxEnabled ? \"not-indexed\" : \"disabled\";\r\n        if (this.effectsEnabled && this.cachedEffects) {\r\n            for (key in this.cachedEffects) { if (this.cachedEffects.hasOwnProperty(key)) { this.state[key] = this.cachedEffects[key]; } }\r\n            this.state.effectsState = \"ready\"; this.state.effectsCatalogCached = true;\r\n        }\r\n        if (this.sfxEnabled && this.cachedSfx) {\r\n            for (key in this.cachedSfx) { if (this.cachedSfx.hasOwnProperty(key)) { this.state[key] = this.cachedSfx[key]; } }\r\n            this.state.sfxState = \"ready\"; this.state.sfxCatalogCached = true;\r\n        }\r\n    };\r\n    Library.prototype.withdrawPending = function () {\r\n        try {\r\n            var path = this.root + \"/requests/pending-launch.json\", pointer = readJson(path);\r\n            if (pointer && pointer.requestId === this.requestId && pointer.sessionId === this.bridge.sessionNonce) { (new File(path)).remove(); }\r\n        } catch (pointerError) { /* Never withdraw a different or malformed request. *\/ }\r\n    };\r\n    Library.prototype.cancelRefresh = function () {\r\n        this.refreshPending = false; this.aeDone = true; this.sfxDone = true;\r\n        this.scanParade = null; this.propertyStack = []; this.project = null; this.comp = null;\r\n        this.lines = []; this.effects = []; this.audio = []; this.seen = {}; this.withdrawPending();\r\n    };\r\n    Library.prototype.saveConfig = function (config) {\r\n        var suffix = new Date().getTime() + \"-\" + (++this.settingsSequence), original = new File(this.root + \"/config.json\"),\r\n            staged = new File(this.root + \"/settings-\" + suffix + \".json\"), backup = new File(this.root + \"/settings-previous-\" + suffix + \".json\"), moved = false;\r\n        this.bridge.writeNewAtomic(staged.fsName, stringify(config));\r\n        try {\r\n            if (original.exists) {\r\n                if (!original.rename(backup.name)) { throw new Error(\"Cannot preserve library configuration: \" + original.error); }\r\n                moved = true;\r\n            }\r\n            if (!staged.rename(\"config.json\")) { throw new Error(\"Cannot save library configuration: \" + staged.error); }\r\n        } catch (saveError) {\r\n            if (moved && !(new File(this.root + \"/config.json\")).exists) { backup.rename(\"config.json\"); }\r\n            try { if (staged.exists && staged.name !== \"config.json\") { staged.remove(); } } catch (ignoredCleanup) {}\r\n            throw saveError;\r\n        }\r\n        if (moved && backup.exists) { backup.remove(); }\r\n    };\r\n    Library.prototype.setEnabled = function (kind, enabled) {\r\n        if ((kind !== \"effects\" && kind !== \"sfx\") || typeof enabled !== \"boolean\") { throw new Error(\"Invalid library switch\"); }\r\n        var config = readJson(this.root + \"/config.json\"), prefs = configPreferences(config);\r\n        if (!config) { config = { schemaVersion: 1 }; }\r\n        if (!config[kind]) { config[kind] = {}; }\r\n        config[kind].enabled = enabled; config.refreshMode = \"manual\";\r\n        // Commit first; malformed/unwritable config never changes live preferences.\r\n        this.saveConfig(config);\r\n        prefs = configPreferences(config); this.configuration = config; this.preferences = prefs; this.configurationError = null;\r\n        // Optional cache migration/publication cannot undo a committed preference.\r\n        this.persistEffectsCache();\r\n        this.effectsEnabled = prefs.effectsEnabled; this.sfxEnabled = prefs.sfxEnabled;\r\n        this.cancelRefresh(); this.applyCached(); this.state.errors = []; this.state.state = this.active ? \"ready\" : \"stopped\";\r\n        try { this.publish(); }\r\n        catch (publicationError) { try { this.bridge.log(\"error\", \"Library settings saved; status publication failed: \" + String(publicationError)); } catch (ignoredLogError) {} }\r\n        return this.getPreferences();\r\n    };\r\n    Library.prototype.setSfxRoots = function (roots) {\r\n        var selected = normalizeRoots(roots, true, false), config = readJson(this.root + \"/config.json\"), prefs = configPreferences(config), previous;\r\n        previous = normalizeRoots(config && config.sfx && typeof config.sfx.roots !== \"undefined\" ? config.sfx.roots : [], true, true);\r\n        if (rootsKey(selected) === rootsKey(previous) && (selected.length ||\r\n                (config && config.sfx && array(config.sfx.roots) && config.sfx.enabled === false))) { return selected; }\r\n        if (!config) { config = { schemaVersion: 1 }; }\r\n        // A new SFX object defaults off; choosing folders is not consent to scan.\r\n        if (!config.sfx) { config.sfx = { enabled: false }; }\r\n        config.sfx.roots = selected;\r\n        // Clearing the list is one explicit opt-out operation. Commit the empty\r\n        // roots and disabled flag together; never substitute a default folder.\r\n        if (!selected.length) { config.sfx.enabled = false; }\r\n        config.sfx.requireRootsMatch = true; config.refreshMode = \"manual\";\r\n        this.saveConfig(config);\r\n        this.configuration = config; this.preferences = configPreferences(config); this.configurationError = null;\r\n        this.effectsEnabled = this.preferences.effectsEnabled; this.sfxEnabled = this.preferences.sfxEnabled;\r\n        this.cachedSfx = null; this.cancelRefresh(); this.persistEffectsCache(); this.applyCached();\r\n        this.state.errors = []; this.state.state = this.active ? \"ready\" : \"stopped\";\r\n        try { this.publish(); }\r\n        catch (publicationError) { try { this.bridge.log(\"error\", \"Library folders saved; status publication failed: \" + String(publicationError)); } catch (ignoredLogError) {} }\r\n        return selected;\r\n    };\r\n    Library.prototype.failSfx = function (message) {\r\n        this.sfxDone = true; this.state.sfxState = \"error\"; this.state.errors.push(String(message));\r\n        try { this.bridge.log(\"error\", \"Library: \" + String(message)); } catch (ignoredLogError) {}\r\n    };\r\n    Library.prototype.begin = function (generation) {\r\n        this.active = true; this.generation = generation; this.refreshPending = false;\r\n        this.bridge.ensureFolder(this.root); this.bridge.ensureFolder(this.root + \"/requests\"); this.bridge.ensureFolder(this.root + \"/sessions\");\r\n        this.folder = this.root + \"/sessions/\" + this.bridge.sessionNonce; this.bridge.ensureFolder(this.folder);\r\n        this.loadPreferences(); this.loadCached();\r\n        // Persist a validated legacy descriptor before current.json is republished\r\n        // under the new connection. This migrates metadata only, not catalog data.\r\n        this.persistEffectsCache();\r\n        this.state = { schema: \"codex-ae-library/v1\", state: \"ready\", sessionId: this.bridge.sessionNonce, generation: generation,\r\n            requestId: \"\", effectsCount: 0, appliedSchemaCount: 0, projectAudioCount: 0, sfxCount: 0, errors: [] };\r\n        this.applyCached();\r\n        if (this.configurationError) {\r\n            this.state.state = \"error\"; this.state.errors.push(this.configurationError);\r\n            try { this.bridge.log(\"error\", this.configurationError); } catch (ignoredLogError) {}\r\n        }\r\n        this.publish();\r\n    };\r\n    Library.prototype.requestRefresh = function () {\r\n        if (this.configurationError) { throw new Error(this.configurationError); }\r\n        if (!this.active || !this.bridge.running || this.generation !== this.bridge.generation || (!this.effectsEnabled && !this.sfxEnabled) || this.refreshPending || this.state.state === \"scanning\") { return false; }\r\n        this.refreshPending = true; return true;\r\n    };\r\n    Library.prototype.refresh = function () {\r\n        var now = new Date().getTime(), i, e, runtime;\r\n        this.refreshPending = false; this.loadPreferences(); this.state.errors = [];\r\n        if (this.configurationError) { this.state.state = \"error\"; this.state.errors.push(this.configurationError); this.publish(); return; }\r\n        this.lastRefresh = now; this.refreshSequence += 1;\r\n        this.requestId = \"library-\" + this.bridge.sessionNonce + \"-\" + this.generation + \"-\" + now + \"-\" + this.refreshSequence;\r\n        this.itemIndex = 1; this.layerIndex = 1; this.comp = null; this.scanParade = null; this.effectIndex = 1; this.propertyStack = [];\r\n        this.lines = []; this.effects = []; this.audio = []; this.seen = {}; this.layerErrors = 0; this.appliedSchemaCount = 0;\r\n        this.aeDone = !this.effectsEnabled; this.sfxDone = !this.sfxEnabled; this.sfxLaunched = false; this.statusReadAt = 0;\r\n        this.state = { schema: \"codex-ae-library/v1\", state: \"scanning\", sessionId: this.bridge.sessionNonce,\r\n            generation: this.generation, requestId: this.requestId, afterEffectsVersion: String(app.version), errors: [] };\r\n        this.applyCached();\r\n        if (this.effectsEnabled) {\r\n            this.state.effectsState = \"scanning\"; this.project = app.project;\r\n            this.lines = [\"AE_PLUGIN_CATALOG_V1\", \"AE\\t\" + clean(app.version)];\r\n            try {\r\n                var registered = app.effects;\r\n                for (i = 0; i < registered.length; i += 1) {\r\n                    e = registered[i]; this.effects.push({ displayName: String(e.displayName), matchName: String(e.matchName), category: String(e.category), version: String(e.version) });\r\n                    this.lines.push(\"EFFECT\\t\" + clean(e.displayName) + \"\\t\" + clean(e.matchName) + \"\\t\" + clean(e.category) + \"\\t\" + clean(e.version));\r\n                }\r\n            } catch (registryError) { this.failAe(\"Effect registry: \" + String(registryError)); }\r\n        } else { this.project = null; }\r\n        if (this.sfxEnabled) {\r\n            this.state.sfxState = \"scanning\";\r\n            try {\r\n                runtime = readJson(this.root + \"/runtime.json\");\r\n                var expectedLauncher = this.bridge.workspaceRoot + \"/tools/Codex AE Background.exe\";\r\n                if (!runtime || runtime.backgroundServiceVersion !== 1 || typeof runtime.backgroundLauncherPath !== \"string\" ||\r\n                        runtime.backgroundLauncherPath.replace(/\\\\/g, \"/\").toLowerCase() !== expectedLauncher.replace(/\\\\/g, \"/\").toLowerCase()) {\r\n                    throw new Error(\"SFX background service is not configured. Run the Codex AE updater or tools/Initialize-AeLibrary.ps1 -SkipScan -StartBackgroundService\");\r\n                }\r\n                var launcher = new File(expectedLauncher);\r\n                if (!launcher.exists || launcher.alias || launcher.parent.alias) { throw new Error(\"SFX background launcher is missing or aliased. Run the Codex AE updater\"); }\r\n                this.bridge.writeNewAtomic(this.root + \"/requests/sfx-\" + this.requestId + \".json\", stringify({\r\n                    schemaVersion: 1, requestId: this.requestId, sessionId: this.bridge.sessionNonce, workspaceRoot: this.bridge.workspaceRoot, createdUtc: new Date(now).toUTCString()\r\n                }));\r\n                // Select this manual request only; never rediscover/replay old requests.\r\n                this.bridge.writeAtomic(this.root + \"/requests/pending-launch.json\", stringify({ schemaVersion: 1, requestId: this.requestId, sessionId: this.bridge.sessionNonce }));\r\n                this.state.sfxLaunchState = \"pending\";\r\n            } catch (launchError) { this.failSfx(\"SFX launcher: \" + String(launchError)); }\r\n        }\r\n        this.publish();\r\n    };\r\n    Library.prototype.readSfxLaunch = function () {\r\n        var launched = readJson(this.root + \"/requests/launch-sfx-\" + this.requestId + \".json\");\r\n        if (!launched) {\r\n            if (new Date().getTime() - this.lastRefresh > 60000) {\r\n                throw new Error(\"SFX background service did not acknowledge within 60 seconds. Run Codex AE Update/Repair; see .ae-codex/library/launcher-errors.log\");\r\n            }\r\n            return;\r\n        }\r\n        if (launched.schemaVersion !== 1 || launched.requestId !== this.requestId || launched.sessionId !== this.bridge.sessionNonce) {\r\n            throw new Error(\"Foreign or invalid SFX launcher acknowledgement\");\r\n        }\r\n        if (launched.state === \"error\") { throw new Error(\"SFX launcher: \" + clean(launched.error || \"failed\").substr(0, 500)); }\r\n        if (launched.state !== \"launched\" || typeof launched.processId !== \"number\" || !isFinite(launched.processId) ||\r\n                launched.processId <= 0 || launched.processId !== Math.floor(launched.processId)) {\r\n            throw new Error(\"Invalid SFX launcher process acknowledgement\");\r\n        }\r\n        this.sfxLaunched = true;\r\n        this.state.sfxLaunchState = \"launched\";\r\n    };\r\n    Library.prototype.failAe = function (message) {\r\n        this.aeDone = true; this.state.effectsState = \"error\"; this.state.errors.push(String(message));\r\n        this.scanParade = null; this.propertyStack = []; this.project = null; this.comp = null;\r\n        this.lines = []; this.effects = []; this.audio = []; this.seen = {};\r\n        try { this.bridge.log(\"error\", \"Library: \" + String(message)); } catch (ignoredLogError) {}\r\n    };\r\n    Library.prototype.scanChunk = function () {\r\n        var deadline = new Date().getTime() + 8, processed = 0, operations = 0, item, layer, effect;\r\n        if (this.project !== app.project) {\r\n            this.failAe(\"Project changed during inventory; press Update Library to rescan\"); return;\r\n        }\r\n        // A single effect can expose thousands of properties. Keep its exact\r\n        // depth-first cursor between ticks instead of recursively blocking AE.\r\n        // Both elapsed time and a fixed operation cap apply even to one layer.\r\n        while (processed < 6 && operations < 64 && new Date().getTime() < deadline) {\r\n            operations += 1;\r\n            if (this.propertyStack.length || this.scanParade) {\r\n                try {\r\n                    if (this.propertyStack.length) {\r\n                        walkStep(this.propertyStack, this.lines);\r\n                        if (!this.propertyStack.length) { this.appliedSchemaCount += 1; }\r\n                    } else if (this.effectIndex <= this.scanParade.numProperties) {\r\n                        effect = this.scanParade.property(this.effectIndex++);\r\n                        if (!effect || this.seen[\"$\" + effect.matchName]) { continue; }\r\n                        this.seen[\"$\" + effect.matchName] = true;\r\n                        this.lines.push(\"APPLIED\\t\" + clean(effect.matchName) + \"\\t\" + clean(effect.name));\r\n                        this.propertyStack.push({ group: effect, path: effect.matchName, index: 1, depth: 0 });\r\n                    } else { this.scanParade = null; }\r\n                } catch (propertyError) {\r\n                    // Match the previous per-layer failure behavior: keep rows\r\n                    // already read, skip the rest of that layer, continue later.\r\n                    this.layerErrors += 1; this.scanParade = null; this.propertyStack = [];\r\n                }\r\n            } else if (this.comp && this.layerIndex <= this.comp.numLayers) {\r\n                processed += 1;\r\n                try {\r\n                    layer = this.comp.layer(this.layerIndex++);\r\n                    this.scanParade = layer.property(\"ADBE Effect Parade\"); this.effectIndex = 1;\r\n                } catch (layerError) { this.layerErrors += 1; }\r\n            } else {\r\n                processed += 1;\r\n                this.comp = null;\r\n                if (!this.project || this.itemIndex > this.project.numItems) { this.finishAe(); return; }\r\n                try {\r\n                    item = this.project.item(this.itemIndex++);\r\n                    if (item instanceof CompItem) { this.comp = item; this.layerIndex = 1; }\r\n                    else if (item instanceof FootageItem && item.hasAudio) {\r\n                        this.audio.push({ id: item.id, name: String(item.name), hasVideo: item.hasVideo,\r\n                            duration: item.duration, filePath: item.file ? item.file.fsName : null,\r\n                            available: item.file ? item.file.exists : false });\r\n                    }\r\n                } catch (itemError) { this.layerErrors += 1; }\r\n            }\r\n        }\r\n    };\r\n    Library.prototype.finishAe = function () {\r\n        var pluginRoot = this.bridge.workspaceRoot + \"/.ae-codex/plugins\", tsv = this.lines.join(\"\\n\"), categories = {}, names = [], i, e, category, index;\r\n        this.state.effectsState = \"ready\";\r\n        this.state.effectsCount = this.effects.length;\r\n        this.state.appliedSchemaCount = this.appliedSchemaCount;\r\n        this.state.effectsCatalogCached = false;\r\n        this.state.effectsTimestampEpochMs = new Date().getTime();\r\n        this.state.projectAudioCount = this.audio.length;\r\n        if (this.layerErrors) { this.state.errors.push(\"Unavailable project layers/items: \" + this.layerErrors); }\r\n        var relative = \".ae-codex/library/sessions/\" + this.bridge.sessionNonce + \"/\";\r\n        this.bridge.writeNewAtomic(this.folder + \"/effects-\" + this.requestId + \".tsv\", tsv);\r\n        this.bridge.writeNewAtomic(this.folder + \"/project-audio-\" + this.requestId + \".json\", stringify({ schema: \"codex-ae-project-audio/v1\", items: this.audio }));\r\n        this.state.effectsRelativePath = relative + \"effects-\" + this.requestId + \".tsv\";\r\n        this.state.projectAudioRelativePath = relative + \"project-audio-\" + this.requestId + \".json\";\r\n        this.bridge.ensureFolder(pluginRoot);\r\n        this.bridge.writeAtomic(pluginRoot + \"/effects-and-parameters.tsv\", tsv);\r\n        for (i = 0; i < this.effects.length; i += 1) {\r\n            e = this.effects[i]; category = e.category || \"Uncategorized\";\r\n            if (!categories[\"$\" + category]) { categories[\"$\" + category] = []; names.push(category); }\r\n            categories[\"$\" + category].push(e);\r\n        }\r\n        names.sort(); index = [\"# Effects registered in After Effects\", \"\", \"Updated manually from Codex Bridge. PARAM rows describe already-applied effects only; license and render support are not verified.\", \"\"];\r\n        for (i = 0; i < names.length; i += 1) {\r\n            category = names[i]; index.push(\"## \" + category + \" (\" + categories[\"$\" + category].length + \")\", \"\", \"| Effect | Exact matchName | Version |\", \"|---|---|---|\");\r\n            var list = categories[\"$\" + category], j;\r\n            for (j = 0; j < list.length; j += 1) { e = list[j]; index.push(\"| \" + clean(e.displayName).replace(/\\|/g, \"\\\\|\") + \" | `\" + e.matchName + \"` | \" + clean(e.version) + \" |\"); }\r\n            index.push(\"\");\r\n        }\r\n        this.bridge.writeAtomic(pluginRoot + \"/effect-index.md\", index.join(\"\\n\"));\r\n        this.cachedEffects = { effectsCount: this.state.effectsCount, projectAudioCount: this.state.projectAudioCount,\r\n            appliedSchemaCount: this.state.appliedSchemaCount, effectsRelativePath: this.state.effectsRelativePath,\r\n            projectAudioRelativePath: this.state.projectAudioRelativePath, effectsTimestampEpochMs: this.state.effectsTimestampEpochMs };\r\n        this.cachedEffectsMetadata = this.state;\r\n        this.bridge.writeAtomic(this.root + \"/latest-effects.json\", stringify(this.state));\r\n        this.aeDone = true; this.project = null; this.comp = null;\r\n        this.lines = []; this.effects = []; this.audio = []; this.seen = {};\r\n    };\r\n    Library.prototype.readSfxStatus = function () {\r\n        if (!this.sfxEnabled) { this.sfxDone = true; return; }\r\n        var status = readJson(this.folder + \"/status-sfx-\" + this.requestId + \".json\");\r\n        if (!status) { return; }\r\n        if (status.requestId !== this.requestId || status.sessionId !== this.bridge.sessionNonce || (status.state !== \"success\" && status.state !== \"error\")) { throw new Error(\"Foreign or invalid SFX status\"); }\r\n        if (status.state === \"success\") {\r\n            var prefix = \".ae-codex/library/sessions/\" + this.bridge.sessionNonce + \"/\";\r\n            if (status.schemaVersion !== 1 || status.kind !== \"disk-sfx\" || !count(status.count) ||\r\n                    status.summaryRelativePath !== prefix + \"summary-sfx-\" + this.requestId + \".json\") { throw new Error(\"Invalid SFX catalog metadata\"); }\r\n            var validatedCatalogPath = catalogPath(status);\r\n            if (typeof status.enabled !== \"undefined\" && typeof status.enabled !== \"boolean\") { throw new Error(\"Invalid SFX enabled flag\"); }\r\n            if (status.enabled === false && status.count !== 0) { throw new Error(\"Disabled SFX inventory must be empty\"); }\r\n            this.state.sfxCompletedUtc = typeof status.completedUtc === \"string\" ? status.completedUtc.substr(0, 80) : null;\r\n            this.state.sfxTimestampEpochMs = typeof status.timestampEpochMs === \"number\" ? status.timestampEpochMs : new Date().getTime();\r\n            this.state.sfxCount = status.count;\r\n            this.state.sfxRelativePath = validatedCatalogPath;\r\n            this.state.sfxCatalogCached = false;\r\n            this.state.sfxCatalogReused = status.reusedCatalog === true;\r\n            this.state.sfxSummaryRelativePath = status.summaryRelativePath;\r\n            this.state.sfxEnabled = status.enabled !== false;\r\n            this.state.sfxState = status.enabled === false ? \"disabled\" : \"ready\";\r\n            if (status.enabled === false) { delete this.state.sfxRelativePath; this.state.sfxCatalogReused = false; }\r\n            this.state.sfxWarnings = status.warnings || [];\r\n            this.state.pendingArchiveCount = status.pendingArchiveCount || 0;\r\n            if (status.enabled !== false) { this.cachedSfx = { sfxRelativePath: validatedCatalogPath, sfxCount: status.count, sfxTimestampEpochMs: this.state.sfxTimestampEpochMs, sfxCompletedUtc: this.state.sfxCompletedUtc }; }\r\n        } else { this.failSfx(\"SFX scan: \" + String(status.error || status.message || \"failed\")); }\r\n        this.sfxDone = true;\r\n    };\r\n    Library.prototype.tick = function () {\r\n        if (!this.active || !this.bridge.running || this.generation !== this.bridge.generation || this.bridge.busy || this.bridge.pendingReport || this.bridge.pendingCleanupFile) { return; }\r\n        try {\r\n            var now = new Date().getTime();\r\n            if (this.refreshPending) { this.refresh(); }\r\n            if (this.state.state !== \"scanning\") { return; }\r\n            if (!this.aeDone && this.effectsEnabled) { this.scanChunk(); }\r\n            if (!this.sfxDone && this.sfxEnabled && now - this.statusReadAt >= 1000) {\r\n                this.statusReadAt = now;\r\n                try {\r\n                    this.readSfxStatus();\r\n                    if (!this.sfxDone && !this.sfxLaunched) { this.readSfxLaunch(); }\r\n                } catch (statusError) { this.failSfx(String(statusError)); }\r\n                if (!this.sfxDone && now - this.lastRefresh > 300000) { this.failSfx(\"SFX scan timed out; cached catalog retained\"); }\r\n            }\r\n            if (this.aeDone && this.sfxDone) {\r\n                this.state.state = this.state.errors.length ? \"partial\" : \"ready\";\r\n                this.withdrawPending(); this.publish();\r\n            }\r\n        } catch (inventoryError) {\r\n            this.cancelRefresh(); this.state.state = \"error\"; this.state.errors.push(String(inventoryError));\r\n            try { this.bridge.log(\"error\", \"Library: \" + String(inventoryError)); } catch (ignoredLogError) {}\r\n            try { this.publish(); } catch (publicationError) { /* Keep bridge jobs usable. *\/ }\r\n        }\r\n    };\r\n    Library.prototype.stop = function () {\r\n        this.active = false; this.cancelRefresh(); this.state.state = \"stopped\";\r\n        try { this.publish(); } catch (stopError) { /* Stop must always work. *\/ }\r\n    };\r\n    Library.prototype.describe = function () {\r\n        if (this.state.state === \"stopped\") { return \"Th\u01b0 vi\u1ec7n: \u0111\u00e3 ng\u1eaft k\u1ebft n\u1ed1i\"; }\r\n        if (this.configurationError) { return \"Th\u01b0 vi\u1ec7n: l\u1ed7i c\u1ea5u h\u00ecnh \u2014 xem nh\u1eadt k\u00fd\"; }\r\n        if (this.state.state === \"error\") { return \"Th\u01b0 vi\u1ec7n: c\u1eadp nh\u1eadt l\u1ed7i \u2014 xem nh\u1eadt k\u00fd\"; }\r\n        if (this.state.state === \"partial\") { return \"Th\u01b0 vi\u1ec7n: c\u1eadp nh\u1eadt ch\u01b0a \u0111\u1ea7y \u0111\u1ee7 \u2014 xem nh\u1eadt k\u00fd\"; }\r\n        if (this.refreshPending) { return \"Th\u01b0 vi\u1ec7n: \u0111ang ch\u1edd c\u1eadp nh\u1eadt\"; }\r\n        if (this.state.state === \"scanning\") { return \"Th\u01b0 vi\u1ec7n: \u0111ang c\u1eadp nh\u1eadt...\"; }\r\n        if ((this.effectsEnabled && this.state.effectsState === \"not-indexed\") || (this.sfxEnabled && this.state.sfxState === \"not-indexed\")) { return \"Ch\u01b0a c\u00f3 d\u1eef li\u1ec7u \u2014 b\u1ea5m C\u1eadp nh\u1eadt th\u01b0 vi\u1ec7n\"; }\r\n        return \"Th\u01b0 vi\u1ec7n: \" + this.state.effectsCount + \" effect | \" + this.state.projectAudioCount + \" \u00e2m thanh d\u1ef1 \u00e1n | \" + this.state.sfxCount + \" SFX\";\r\n    };\r\n    Library.prototype.heartbeat = function () {\r\n        return { state: this.state.state, manualRefresh: true, refreshPending: this.refreshPending,\r\n            manifestRelativePath: \".ae-codex/library/current.json\", requestId: this.requestId || \"\",\r\n            effectsEnabled: this.effectsEnabled, sfxEnabled: this.sfxEnabled, effectsCount: this.state.effectsCount, sfxCount: this.state.sfxCount };\r\n    };\r\n    $.global.__codexAeLibraryFactoryV1 = function (bridge) { return new Library(bridge); };\r\n    $.global.__codexAeLibraryJsonV1 = stringify;\r\n}());\r\n"
 "/*\n * Create one editable orange-neon loading bar Shape Layer in the active comp.\n * The currently selected footage layer is used as a placement/scale reference\n * when possible. The bar remains fully editable through Loading Progress (%).\n *\/\n(function () {\n    var project = app.project;\n    var comp;\n    var selectedLayers;\n    var referenceLayer = null;\n    var referenceName = \"none\";\n    var barPosition;\n    var barWidth;\n    var unit;\n    var outerHeight;\n    var innerWidth;\n    var innerHeight;\n    var fillHeight;\n    var leftEdge;\n    var progressName = \"Loading Progress (%)\";\n    var progressDefault = 83;\n    var layer;\n    var root;\n    var effects;\n    var glowCount = 0;\n    var particles;\n    var streaks;\n    var index;\n\n    function clamp(value, minimum, maximum) {\n        return Math.max(minimum, Math.min(maximum, value));\n    }\n\n    function fixed(value) {\n        return Number(value).toFixed(4);\n    }\n\n    function uniqueLayerName(targetComp, baseName) {\n        var candidate = baseName;\n        var suffix = 2;\n        var layerIndex;\n        var collision;\n\n        while (true) {\n            collision = false;\n            for (layerIndex = 1; layerIndex <= targetComp.numLayers; layerIndex += 1) {\n                if (targetComp.layer(layerIndex).name === candidate) {\n                    collision = true;\n                    break;\n                }\n            }\n\n            if (!collision) {\n                return candidate;\n            }\n\n            candidate = baseName + \" \" + suffix;\n            suffix += 1;\n        }\n    }\n\n    function setIfPresent(group, matchName, value) {\n        var property = group ? group.property(matchName) : null;\n        if (property) {\n            property.setValue(value);\n            return true;\n        }\n        return false;\n    }\n\n    function setExpression(property, expressionText, label) {\n        if (!property || !property.canSetExpression) {\n            throw new Error(\"Cannot add expression to \" + label + \".\");\n        }\n\n        property.expression = expressionText;\n        property.expressionEnabled = true;\n\n        if (property.expressionError && property.expressionError !== \"\") {\n            throw new Error(label + \" expression error: \" + property.expressionError);\n        }\n    }\n\n    function addSliderControl(effectGroup, controlName, value) {\n        var control;\n        var slider;\n\n        if (!effectGroup || !effectGroup.canAddProperty(\"ADBE Slider Control\")) {\n            throw new Error(\"Slider Control is unavailable in this After Effects installation.\");\n        }\n\n        control = effectGroup.addProperty(\"ADBE Slider Control\");\n        control.name = controlName;\n        slider = control.property(\"ADBE Slider Control-0001\");\n        if (!slider) {\n            slider = control.property(1);\n        }\n        if (!slider) {\n            throw new Error(\"Could not access the loading progress slider.\");\n        }\n        slider.setValue(value);\n    }\n\n    function addGlow(effectGroup, effectName, threshold, radius, intensity) {\n        var glow;\n\n        if (!effectGroup || !effectGroup.canAddProperty(\"ADBE Glo2\")) {\n            return false;\n        }\n\n        glow = effectGroup.addProperty(\"ADBE Glo2\");\n        glow.name = effectName;\n        setIfPresent(glow, \"ADBE Glow-0002\", threshold);\n        setIfPresent(glow, \"ADBE Glow-0003\", radius);\n        setIfPresent(glow, \"ADBE Glow-0004\", intensity);\n        return true;\n    }\n\n    function addStroke(contents, color, width, opacity) {\n        var stroke = contents.addProperty(\"ADBE Vector Graphic - Stroke\");\n        setIfPresent(stroke, \"ADBE Vector Stroke Color\", color);\n        setIfPresent(stroke, \"ADBE Vector Stroke Width\", width);\n        setIfPresent(stroke, \"ADBE Vector Stroke Opacity\", opacity);\n        setIfPresent(stroke, \"ADBE Vector Stroke Line Cap\", 2);\n        setIfPresent(stroke, \"ADBE Vector Stroke Line Join\", 2);\n    }\n\n    function addFill(contents, color, opacity) {\n        var fill = contents.addProperty(\"ADBE Vector Graphic - Fill\");\n        setIfPresent(fill, \"ADBE Vector Fill Color\", color);\n        setIfPresent(fill, \"ADBE Vector Fill Opacity\", opacity);\n    }\n\n    function moveGroupToFront(targetRoot, groupIndex) {\n        var group = targetRoot.property(groupIndex);\n        if (group && group.propertyIndex !== 1) {\n            group.moveTo(1);\n        }\n    }\n\n    function addFixedRoundedRect(\n        targetRoot,\n        groupName,\n        size,\n        position,\n        roundness,\n        fillColor,\n        fillOpacity,\n        strokeColor,\n        strokeWidth,\n        strokeOpacity\n    ) {\n        var group = targetRoot.addProperty(\"ADBE Vector Group\");\n        var groupIndex;\n        var contents;\n        var rectangle;\n\n        group.name = groupName;\n        groupIndex = group.propertyIndex;\n        contents = group.property(\"ADBE Vectors Group\");\n        rectangle = contents.addProperty(\"ADBE Vector Shape - Rect\");\n        rectangle.name = groupName + \" Path\";\n        setIfPresent(rectangle, \"ADBE Vector Rect Size\", size);\n        setIfPresent(rectangle, \"ADBE Vector Rect Position\", position);\n        setIfPresent(rectangle, \"ADBE Vector Rect Roundness\", roundness);\n\n        if (strokeColor !== null && strokeWidth > 0 && strokeOpacity > 0) {\n            addStroke(contents, strokeColor, strokeWidth, strokeOpacity);\n        }\n        if (fillColor !== null && fillOpacity > 0) {\n            addFill(contents, fillColor, fillOpacity);\n        }\n\n        moveGroupToFront(targetRoot, groupIndex);\n    }\n\n    function addDynamicRoundedRect(\n        targetRoot,\n        groupName,\n        sizeExpression,\n        positionExpression,\n        roundness,\n        fillColor,\n        fillOpacity,\n        strokeColor,\n        strokeWidth,\n        strokeOpacity,\n        opacityExpression\n    ) {\n        var group = targetRoot.addProperty(\"ADBE Vector Group\");\n        var groupIndex;\n        var contents;\n        var rectangle;\n        var groupTransform;\n        var groupOpacity;\n\n        group.name = groupName;\n        groupIndex = group.propertyIndex;\n        contents = group.property(\"ADBE Vectors Group\");\n        rectangle = contents.addProperty(\"ADBE Vector Shape - Rect\");\n        rectangle.name = groupName + \" Path\";\n        setIfPresent(rectangle, \"ADBE Vector Rect Size\", [1, Math.max(1, roundness * 2)]);\n        setIfPresent(rectangle, \"ADBE Vector Rect Position\", [0, 0]);\n        setIfPresent(rectangle, \"ADBE Vector Rect Roundness\", roundness);\n        setExpression(\n            rectangle.property(\"ADBE Vector Rect Size\"),\n            sizeExpression,\n            groupName + \" size\"\n        );\n        setExpression(\n            rectangle.property(\"ADBE Vector Rect Position\"),\n            positionExpression,\n            groupName + \" position\"\n        );\n\n        if (strokeColor !== null && strokeWidth > 0 && strokeOpacity > 0) {\n            addStroke(contents, strokeColor, strokeWidth, strokeOpacity);\n        }\n        if (fillColor !== null && fillOpacity > 0) {\n            addFill(contents, fillColor, fillOpacity);\n        }\n\n        if (opacityExpression) {\n            group = targetRoot.property(groupIndex);\n            groupTransform = group.property(\"ADBE Vector Transform Group\");\n            groupOpacity = groupTransform.property(\"ADBE Vector Group Opacity\");\n            setExpression(groupOpacity, opacityExpression, groupName + \" opacity\");\n        }\n\n        moveGroupToFront(targetRoot, groupIndex);\n    }\n\n    function addParticle(\n        targetRoot,\n        groupName,\n        position,\n        size,\n        color,\n        revealAt,\n        opacity,\n        isStar\n    ) {\n        var group = targetRoot.addProperty(\"ADBE Vector Group\");\n        var groupIndex;\n        var contents;\n        var ellipse;\n        var horizontal;\n        var vertical;\n        var transform;\n        var opacityProperty;\n\n        group.name = groupName;\n        groupIndex = group.propertyIndex;\n        contents = group.property(\"ADBE Vectors Group\");\n\n        ellipse = contents.addProperty(\"ADBE Vector Shape - Ellipse\");\n        ellipse.name = \"Core\";\n        setIfPresent(ellipse, \"ADBE Vector Ellipse Size\", [size, size]);\n        setIfPresent(ellipse, \"ADBE Vector Ellipse Position\", [0, 0]);\n\n        if (isStar) {\n            horizontal = contents.addProperty(\"ADBE Vector Shape - Rect\");\n            horizontal.name = \"Horizontal Ray\";\n            setIfPresent(horizontal, \"ADBE Vector Rect Size\", [size * 4.2, Math.max(0.7, size * 0.34)]);\n            setIfPresent(horizontal, \"ADBE Vector Rect Position\", [0, 0]);\n            setIfPresent(horizontal, \"ADBE Vector Rect Roundness\", size * 0.17);\n\n            vertical = contents.addProperty(\"ADBE Vector Shape - Rect\");\n            vertical.name = \"Vertical Ray\";\n            setIfPresent(vertical, \"ADBE Vector Rect Size\", [Math.max(0.7, size * 0.34), size * 4.2]);\n            setIfPresent(vertical, \"ADBE Vector Rect Position\", [0, 0]);\n            setIfPresent(vertical, \"ADBE Vector Rect Roundness\", size * 0.17);\n        }\n\n        addFill(contents, color, 100);\n\n        group = targetRoot.property(groupIndex);\n        transform = group.property(\"ADBE Vector Transform Group\");\n        setIfPresent(transform, \"ADBE Vector Position\", position);\n        opacityProperty = transform.property(\"ADBE Vector Group Opacity\");\n        setExpression(\n            opacityProperty,\n            \"effect(\\\"\" + progressName + \"\\\")(1) >= \" + fixed(revealAt) +\n                \" ? \" + fixed(opacity) + \" : 0\",\n            groupName + \" reveal\"\n        );\n\n        moveGroupToFront(targetRoot, groupIndex);\n    }\n\n    function addStreak(\n        targetRoot,\n        groupName,\n        position,\n        length,\n        thickness,\n        rotation,\n        revealAt,\n        opacity\n    ) {\n        var group = targetRoot.addProperty(\"ADBE Vector Group\");\n        var groupIndex;\n        var contents;\n        var rectangle;\n        var transform;\n        var opacityProperty;\n\n        group.name = groupName;\n        groupIndex = group.propertyIndex;\n        contents = group.property(\"ADBE Vectors Group\");\n        rectangle = contents.addProperty(\"ADBE Vector Shape - Rect\");\n        rectangle.name = \"Light Streak\";\n        setIfPresent(rectangle, \"ADBE Vector Rect Size\", [length, thickness]);\n        setIfPresent(rectangle, \"ADBE Vector Rect Position\", [0, 0]);\n        setIfPresent(rectangle, \"ADBE Vector Rect Roundness\", thickness / 2);\n        addFill(contents, [1, 0.82, 0.40], 100);\n\n        group = targetRoot.property(groupIndex);\n        transform = group.property(\"ADBE Vector Transform Group\");\n        setIfPresent(transform, \"ADBE Vector Position\", position);\n        setIfPresent(transform, \"ADBE Vector Rotation\", rotation);\n        opacityProperty = transform.property(\"ADBE Vector Group Opacity\");\n        setExpression(\n            opacityProperty,\n            \"effect(\\\"\" + progressName + \"\\\")(1) >= \" + fixed(revealAt) +\n                \" ? \" + fixed(opacity) + \" : 0\",\n            groupName + \" reveal\"\n        );\n\n        moveGroupToFront(targetRoot, groupIndex);\n    }\n\n    function addEndFlare(targetRoot, groupName, scaleUnit, positionExpression) {\n        var group = targetRoot.addProperty(\"ADBE Vector Group\");\n        var groupIndex;\n        var contents;\n        var ellipse;\n        var vertical;\n        var transform;\n        var opacityProperty;\n\n        group.name = groupName;\n        groupIndex = group.propertyIndex;\n        contents = group.property(\"ADBE Vectors Group\");\n\n        ellipse = contents.addProperty(\"ADBE Vector Shape - Ellipse\");\n        ellipse.name = \"End Glow\";\n        setIfPresent(ellipse, \"ADBE Vector Ellipse Size\", [9 * scaleUnit, 31 * scaleUnit]);\n        setIfPresent(ellipse, \"ADBE Vector Ellipse Position\", [0, 0]);\n\n        vertical = contents.addProperty(\"ADBE Vector Shape - Rect\");\n        vertical.name = \"Hot Edge\";\n        setIfPresent(vertical, \"ADBE Vector Rect Size\", [1.5 * scaleUnit, 25 * scaleUnit]);\n        setIfPresent(vertical, \"ADBE Vector Rect Position\", [0, 0]);\n        setIfPresent(vertical, \"ADBE Vector Rect Roundness\", 0.75 * scaleUnit);\n        addFill(contents, [1, 0.93, 0.54], 100);\n\n        group = targetRoot.property(groupIndex);\n        transform = group.property(\"ADBE Vector Transform Group\");\n        setExpression(\n            transform.property(\"ADBE Vector Position\"),\n            positionExpression,\n            groupName + \" position\"\n        );\n        opacityProperty = transform.property(\"ADBE Vector Group Opacity\");\n        setExpression(\n            opacityProperty,\n            \"effect(\\\"\" + progressName + \"\\\")(1) > 1 ? 35 : 0\",\n            groupName + \" opacity\"\n        );\n\n        moveGroupToFront(targetRoot, groupIndex);\n    }\n\n    function currentReferenceMetrics(targetComp) {\n        var result = null;\n        var selected = targetComp.selectedLayers;\n        var candidate;\n        var transform;\n        var positionProperty;\n        var scaleProperty;\n        var positionValue;\n        var scaleValue;\n        var source;\n        var displayedWidth;\n\n        if (!selected || selected.length !== 1) {\n            return result;\n        }\n\n        candidate = selected[0];\n        transform = candidate.property(\"ADBE Transform Group\");\n        if (!transform) {\n            return result;\n        }\n\n        positionProperty = transform.property(\"ADBE Position\");\n        scaleProperty = transform.property(\"ADBE Scale\");\n        if (!positionProperty || !scaleProperty) {\n            return result;\n        }\n\n        positionValue = positionProperty.value;\n        scaleValue = scaleProperty.value;\n        if (!positionValue || positionValue.length < 2 || !scaleValue || scaleValue.length < 2) {\n            return result;\n        }\n\n        try {\n            source = candidate.source;\n        } catch (sourceError) {\n            source = null;\n        }\n\n        if (!source || source.width === undefined || source.width <= 0) {\n            return result;\n        }\n\n        displayedWidth = source.width * Math.abs(scaleValue[0]) / 100;\n        if (displayedWidth < 300 || displayedWidth > targetComp.width * 1.5) {\n            return result;\n        }\n\n        result = {\n            layer: candidate,\n            name: candidate.name,\n            position: [positionValue[0], positionValue[1]],\n            displayedWidth: displayedWidth\n        };\n        return result;\n    }\n\n    if (!project) {\n        throw new Error(\"No After Effects project is open.\");\n    }\n\n    comp = project.activeItem;\n    if (!(comp instanceof CompItem)) {\n        throw new Error(\"Open or select a composition before running this script.\");\n    }\n\n    selectedLayers = comp.selectedLayers;\n    referenceLayer = currentReferenceMetrics(comp);\n\n    if (referenceLayer) {\n        barPosition = [referenceLayer.position[0], referenceLayer.position[1]];\n        barWidth = Math.round(referenceLayer.displayedWidth * 0.82);\n        referenceName = referenceLayer.name;\n    } else {\n        barPosition = [comp.width / 2, comp.height / 2];\n        barWidth = Math.round(comp.width * 0.72);\n    }\n\n    barWidth = clamp(barWidth, 320, Math.max(320, comp.width - 80));\n    unit = barWidth / 630;\n    if (52 * unit > comp.height * 0.14) {\n        unit = comp.height * 0.14 / 52;\n        barWidth = 630 * unit;\n    }\n\n    outerHeight = 52 * unit;\n    innerWidth = barWidth - (16 * unit);\n    innerHeight = 44 * unit;\n    fillHeight = 40 * unit;\n    leftEdge = -innerWidth / 2;\n\n    app.beginUndoGroup(\"Codex: Create Orange Neon Loading Bar\");\n    try {\n        layer = comp.layers.addShape();\n        layer.name = uniqueLayerName(comp, \"Loading Bar - Orange Neon\");\n        layer.comment =\n            \"Editable vector loading bar. Animate the Loading Progress (%) slider from 0 to 100.\";\n        layer.property(\"ADBE Transform Group\")\n            .property(\"ADBE Anchor Point\")\n            .setValue([0, 0]);\n        layer.property(\"ADBE Transform Group\")\n            .property(\"ADBE Position\")\n            .setValue(barPosition);\n\n        effects = layer.property(\"ADBE Effect Parade\");\n        addSliderControl(effects, progressName, progressDefault);\n        if (addGlow(effects, \"Warm Glow - Tight\", 45, 12 * unit, 1.10)) {\n            glowCount += 1;\n        }\n        if (addGlow(effects, \"Warm Glow - Soft\", 28, 34 * unit, 0.42)) {\n            glowCount += 1;\n        }\n\n        root = layer.property(\"ADBE Root Vectors Group\");\n        if (!root || !root.canAddProperty(\"ADBE Vector Group\")) {\n            throw new Error(\"The new Shape Layer does not expose editable vector contents.\");\n        }\n\n        /* Back-to-front base construction. Every newly added group is moved to front. *\/\n        addFixedRoundedRect(\n            root,\n            \"Outer Glow - Wide\",\n            [barWidth + (12 * unit), outerHeight + (12 * unit)],\n            [0, 0],\n            (outerHeight + (12 * unit)) / 2,\n            null,\n            0,\n            [1, 0.20, 0.015],\n            10 * unit,\n            13\n        );\n        addFixedRoundedRect(\n            root,\n            \"Outer Glow - Tight\",\n            [barWidth + (4 * unit), outerHeight + (4 * unit)],\n            [0, 0],\n            (outerHeight + (4 * unit)) / 2,\n            null,\n            0,\n            [1, 0.29, 0.025],\n            5 * unit,\n            38\n        );\n        addFixedRoundedRect(\n            root,\n            \"Outer Dark Frame\",\n            [barWidth, outerHeight],\n            [0, 0],\n            outerHeight / 2,\n            [0.038, 0.025, 0.064],\n            100,\n            [0.43, 0.17, 0.095],\n            3 * unit,\n            90\n        );\n        addFixedRoundedRect(\n            root,\n            \"Inner Track\",\n            [barWidth - (8 * unit), innerHeight],\n            [0, 0],\n            innerHeight / 2,\n            [0.035, 0.030, 0.055],\n            100,\n            [0.20, 0.13, 0.21],\n            2 * unit,\n            92\n        );\n        addFixedRoundedRect(\n            root,\n            \"Track Top Sheen\",\n            [innerWidth - (8 * unit), 2.4 * unit],\n            [0, -14 * unit],\n            1.2 * unit,\n            [0.55, 0.35, 0.29],\n            20,\n            null,\n            0,\n            0\n        );\n\n        addDynamicRoundedRect(\n            root,\n            \"Fill Aura\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\n[Math.max(0.01,\" + fixed(innerWidth) + \"*p+\" + fixed(4 * unit) +\n                \"),\" + fixed(fillHeight + (8 * unit)) + \"]\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=\" + fixed(innerWidth) + \"*p+\" + fixed(4 * unit) + \";\" +\n                \"\\n[\" + fixed(leftEdge - (2 * unit)) + \"+w/2,0]\",\n            (fillHeight + (8 * unit)) / 2,\n            [1, 0.20, 0.01],\n            23,\n            [1, 0.27, 0.015],\n            6 * unit,\n            24,\n            \"effect(\\\"\" + progressName + \"\\\")(1)<=0?0:100\"\n        );\n        addDynamicRoundedRect(\n            root,\n            \"Fill Core\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\n[Math.max(0.01,\" + fixed(innerWidth) + \"*p),\" + fixed(fillHeight) + \"]\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=\" + fixed(innerWidth) + \"*p;\" +\n                \"\\n[\" + fixed(leftEdge) + \"+w/2,0]\",\n            fillHeight / 2,\n            [0.98, 0.40, 0.035],\n            100,\n            [1, 0.69, 0.17],\n            3 * unit,\n            100,\n            \"effect(\\\"\" + progressName + \"\\\")(1)<=0?0:100\"\n        );\n        addDynamicRoundedRect(\n            root,\n            \"Lower Orange Shade\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(8 * unit) + \");\" +\n                \"\\n[w,\" + fixed(13 * unit) + \"]\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(8 * unit) + \");\" +\n                \"\\n[\" + fixed(leftEdge + (4 * unit)) + \"+w/2,\" + fixed(10 * unit) + \"]\",\n            6.5 * unit,\n            [0.91, 0.18, 0.018],\n            34,\n            null,\n            0,\n            0,\n            \"effect(\\\"\" + progressName + \"\\\")(1)>1.5?100:0\"\n        );\n        addDynamicRoundedRect(\n            root,\n            \"Golden Center\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(8 * unit) + \");\" +\n                \"\\n[w,\" + fixed(23 * unit) + \"]\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(8 * unit) + \");\" +\n                \"\\n[\" + fixed(leftEdge + (4 * unit)) + \"+w/2,\" + fixed(-2 * unit) + \"]\",\n            11.5 * unit,\n            [1, 0.61, 0.10],\n            45,\n            null,\n            0,\n            0,\n            \"effect(\\\"\" + progressName + \"\\\")(1)>1.5?100:0\"\n        );\n        addDynamicRoundedRect(\n            root,\n            \"Top Golden Highlight\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(18 * unit) + \");\" +\n                \"\\n[w,\" + fixed(8 * unit) + \"]\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(18 * unit) + \");\" +\n                \"\\n[\" + fixed(leftEdge + (9 * unit)) + \"+w/2,\" + fixed(-11 * unit) + \"]\",\n            4 * unit,\n            [1, 0.84, 0.31],\n            62,\n            null,\n            0,\n            0,\n            \"effect(\\\"\" + progressName + \"\\\")(1)>3?100:0\"\n        );\n        addDynamicRoundedRect(\n            root,\n            \"Hot Specular Line\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(26 * unit) + \");\" +\n                \"\\n[w,\" + fixed(2.2 * unit) + \"]\",\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=Math.max(0.01,\" + fixed(innerWidth) + \"*p-\" + fixed(26 * unit) + \");\" +\n                \"\\n[\" + fixed(leftEdge + (13 * unit)) + \"+w/2,\" + fixed(-15 * unit) + \"]\",\n            1.1 * unit,\n            [1, 0.96, 0.63],\n            76,\n            null,\n            0,\n            0,\n            \"effect(\\\"\" + progressName + \"\\\")(1)>5?100:0\"\n        );\n\n        streaks = [\n            [0.08, -7, 15, 1.0, 58, 15],\n            [0.16, 9, 11, 0.8, 58, 13],\n            [0.27, -1, 20, 1.0, 58, 16],\n            [0.39, 11, 13, 0.8, 58, 12],\n            [0.50, -9, 18, 0.9, 58, 14],\n            [0.61, 5, 24, 0.9, 58, 13],\n            [0.72, -5, 14, 0.8, 58, 15],\n            [0.79, 10, 10, 0.8, 58, 11]\n        ];\n\n        for (index = 0; index < streaks.length; index += 1) {\n            addStreak(\n                root,\n                \"Warm Streak \" + (index + 1),\n                [\n                    leftEdge + (innerWidth * streaks[index][0]),\n                    streaks[index][1] * unit\n                ],\n                streaks[index][2] * unit,\n                streaks[index][3] * unit,\n                streaks[index][4],\n                (streaks[index][0] * 100) + 1.5,\n                streaks[index][5]\n            );\n        }\n\n        particles = [\n            [0.035, -6, 2.2, 62, 0],\n            [0.070, 11, 1.7, 44, 0],\n            [0.105, -13, 2.6, 72, 0],\n            [0.145, 3, 1.4, 50, 0],\n            [0.185, 13, 2.1, 67, 0],\n            [0.225, -5, 3.0, 78, 1],\n            [0.270, 8, 1.6, 48, 0],\n            [0.315, -12, 2.0, 64, 0],\n            [0.355, 2, 1.3, 44, 0],\n            [0.395, 13, 2.8, 74, 1],\n            [0.440, -6, 1.7, 54, 0],\n            [0.480, 6, 2.2, 68, 0],\n            [0.525, -13, 1.4, 47, 0],\n            [0.565, 12, 2.4, 71, 0],\n            [0.610, -3, 3.2, 82, 1],\n            [0.650, 8, 1.5, 48, 0],\n            [0.690, -12, 2.0, 61, 0],\n            [0.725, 2, 1.4, 50, 0],\n            [0.755, 12, 2.5, 70, 1],\n            [0.785, -6, 1.6, 53, 0]\n        ];\n\n        for (index = 0; index < particles.length; index += 1) {\n            addParticle(\n                root,\n                \"Spark \" + (index + 1),\n                [\n                    leftEdge + (innerWidth * particles[index][0]),\n                    particles[index][1] * unit\n                ],\n                particles[index][2] * unit,\n                particles[index][4] ? [1, 0.96, 0.69] : [1, 0.85, 0.42],\n                (particles[index][0] * 100) + 1,\n                particles[index][3],\n                particles[index][4] === 1\n            );\n        }\n\n        addEndFlare(\n            root,\n            \"Fill End Flare\",\n            unit,\n            \"var p=Math.max(0,Math.min(100,effect(\\\"\" + progressName + \"\\\")(1)))/100;\" +\n                \"\\nvar w=\" + fixed(innerWidth) + \"*p;\" +\n                \"\\n[\" + fixed(leftEdge) + \"+w-\" + fixed(4 * unit) + \",0]\"\n        );\n\n        return \"Created layer='\" + layer.name + \"'\" +\n            \"; comp='\" + comp.name + \"'\" +\n            \"; progress=\" + progressDefault + \"%\" +\n            \"; bar=\" + Math.round(barWidth) + \"x\" + Math.round(outerHeight) +\n            \"; position=\" + Math.round(barPosition[0]) + \",\" + Math.round(barPosition[1]) +\n            \"; reference='\" + referenceName + \"'\" +\n            \"; vectorGroups=\" + root.numProperties +\n            \"; glowEffects=\" + glowCount + \".\";\n    } finally {\n        app.endUndoGroup();\n    }\n}());\n"
-"#target aftereffects\n/* Read-only, incremental inventories used by Codex Bridge. No project mutations. *\/\n(function () {\n    function stringify(value) {\n        var i, parts = [], key;\n        if (value === null || typeof value === \"undefined\") { return \"null\"; }\n        if (typeof value === \"string\") {\n            return '\"' + value.replace(/[\\\\\"\\x00-\\x1f]/g, function (c) {\n                var n = c.charCodeAt(0).toString(16);\n                if (c === \"\\\\\") { return \"\\\\\\\\\"; }\n                if (c === '\"') { return '\\\\\"'; }\n                while (n.length < 4) { n = \"0\" + n; }\n                return \"\\\\u\" + n;\n            }) + '\"';\n        }\n        if (typeof value === \"number\") { return isFinite(value) ? String(value) : \"null\"; }\n        if (typeof value === \"boolean\") { return value ? \"true\" : \"false\"; }\n        if (value instanceof Array) {\n            for (i = 0; i < value.length; i += 1) { parts.push(stringify(value[i])); }\n            return \"[\" + parts.join(\",\") + \"]\";\n        }\n        for (key in value) {\n            if (value.hasOwnProperty(key)) { parts.push(stringify(key) + \":\" + stringify(value[key])); }\n        }\n        return \"{\" + parts.join(\",\") + \"}\";\n    }\n\n    // External status/config is data only: never eval JSON or shell fragments.\n    function parseJson(text) {\n        var at = 0;\n        function space() { while (at < text.length && /\\s/.test(text.charAt(at))) { at += 1; } }\n        function fail() { throw new Error(\"Invalid library JSON at \" + at); }\n        function string() {\n            var out = \"\", c, hex;\n            at += 1;\n            while (at < text.length) {\n                c = text.charAt(at++);\n                if (c === '\"') { return out; }\n                if (c.charCodeAt(0) < 32) { fail(); }\n                if (c === \"\\\\\") {\n                    c = text.charAt(at++);\n                    if (c === \"u\") {\n                        hex = text.substr(at, 4);\n                        if (!/^[0-9a-fA-F]{4}$/.test(hex)) { fail(); }\n                        out += String.fromCharCode(parseInt(hex, 16)); at += 4;\n                    } else if (c === \"n\") { out += \"\\n\"; }\n                    else if (c === \"r\") { out += \"\\r\"; }\n                    else if (c === \"t\") { out += \"\\t\"; }\n                    else if (c === \"b\") { out += \"\\b\"; }\n                    else if (c === \"f\") { out += \"\\f\"; }\n                    else if (c === '\"' || c === \"\\\\\" || c === \"/\") { out += c; }\n                    else { fail(); }\n                } else { out += c; }\n            }\n            fail();\n        }\n        function value(depth) {\n            var c, out, key, number;\n            if (depth > 30) { fail(); }\n            space(); c = text.charAt(at);\n            if (c === '\"') { return string(); }\n            if (c === \"{\" || c === \"[\") {\n                at += 1; out = c === \"{\" ? {} : []; space();\n                if (text.charAt(at) === (c === \"{\" ? \"}\" : \"]\")) { at += 1; return out; }\n                while (at < text.length) {\n                    if (c === \"{\") {\n                        if (text.charAt(at) !== '\"') { fail(); }\n                        key = string();\n                        if (key === \"__proto__\" || key === \"constructor\" || key === \"prototype\" || key === \"hasOwnProperty\" || out.hasOwnProperty(key)) { fail(); }\n                        space(); if (text.charAt(at++) !== \":\") { fail(); }\n                        out[key] = value(depth + 1);\n                    } else { out.push(value(depth + 1)); }\n                    space();\n                    if (text.charAt(at) === (c === \"{\" ? \"}\" : \"]\")) { at += 1; return out; }\n                    if (text.charAt(at++) !== \",\") { fail(); }\n                    space();\n                }\n                fail();\n            }\n            if (text.substr(at, 4) === \"true\") { at += 4; return true; }\n            if (text.substr(at, 5) === \"false\") { at += 5; return false; }\n            if (text.substr(at, 4) === \"null\") { at += 4; return null; }\n            number = text.substr(at).match(/^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);\n            if (number) { at += number[0].length; out = Number(number[0]); if (!isFinite(out)) { fail(); } return out; }\n            fail();\n        }\n        var result = value(0); space(); if (at !== text.length) { fail(); } return result;\n    }\n    function readJson(path) {\n        var f = new File(path), data;\n        if (!f.exists) { return null; }\n        if (f.length > 262144) { throw new Error(\"Library metadata exceeds size limit\"); }\n        f.encoding = \"UTF-8\";\n        if (!f.open(\"r\")) { throw new Error(\"Cannot read library metadata: \" + path); }\n        try { data = f.read(); } finally { f.close(); }\n        return parseJson(data.replace(/^\\uFEFF/, \"\"));\n    }\n    function clean(value) { return String(value).replace(/[\\t\\r\\n]/g, \" \"); }\n    function catalogPath(status) {\n        var session = status.catalogSessionId || status.sessionId, request = status.catalogRequestId || status.requestId;\n        if (typeof session !== \"string\" || !/^[A-Za-z0-9-]{8,80}$/.test(session) ||\n                typeof request !== \"string\" || !/^[A-Za-z0-9-]{8,80}$/.test(request)) { throw new Error(\"Invalid SFX catalog identity\"); }\n        var expected = \".ae-codex/library/sessions/\" + session + \"/sfx-\" + request + \".jsonl\";\n        if (status.catalogRelativePath !== expected) { throw new Error(\"Invalid SFX catalog path\"); }\n        return expected;\n    }\n    function safeValue(p) {\n        try {\n            if (p.propertyValueType === PropertyValueType.CUSTOM_VALUE || p.propertyValueType === PropertyValueType.NO_VALUE) { return \"\"; }\n            return clean(p.value);\n        } catch (e) { return \"unavailable\"; }\n    }\n    function walk(group, path, lines, depth) {\n        var i, p, range;\n        for (i = 1; i <= group.numProperties; i += 1) {\n            p = group.property(i); if (!p) { continue; } range = \"\";\n            if (p.propertyType === PropertyType.PROPERTY) {\n                try {\n                    if (p.hasMin) { range += \"min=\" + p.minValue + \" \"; }\n                    if (p.hasMax) { range += \"max=\" + p.maxValue; }\n                } catch (rangeError) { range = \"unavailable\"; }\n            }\n            lines.push(\"PARAM\\t\" + clean(path) + \"\\t\" + clean(p.matchName) + \"\\t\" + clean(p.name) + \"\\t\" + p.propertyType + \"\\t\" + range + \"\\t\" + (p.propertyType === PropertyType.PROPERTY ? safeValue(p) : \"\"));\n            if (p.propertyType !== PropertyType.PROPERTY && depth < 8) { walk(p, path + \"/\" + p.matchName, lines, depth + 1); }\n        }\n    }\n    function Library(bridge) {\n        this.bridge = bridge;\n        this.root = bridge.workspaceRoot + \"/.ae-codex/library\";\n        this.active = false;\n        this.lastRefresh = 0;\n        this.intervalMs = 120000;\n        this.state = { schema: \"codex-ae-library/v1\", state: \"stopped\", effectsCount: 0, sfxCount: 0 };\n    }\n    Library.prototype.publish = function () {\n        this.state.timestampEpochMs = new Date().getTime();\n        this.bridge.writeAtomic(this.root + \"/current.json\", stringify(this.state));\n    };\n    Library.prototype.begin = function (generation) {\n        this.active = true; this.generation = generation;\n        this.bridge.ensureFolder(this.root);\n        this.bridge.ensureFolder(this.root + \"/requests\");\n        this.bridge.ensureFolder(this.root + \"/sessions\");\n        this.folder = this.root + \"/sessions/\" + this.bridge.sessionNonce;\n        this.bridge.ensureFolder(this.folder);\n        this.refresh();\n    };\n    Library.prototype.refresh = function () {\n        var now = new Date().getTime(), i, e, config, runtime, command, result, cached;\n        this.lastRefresh = now;\n        this.requestId = \"library-\" + this.bridge.sessionNonce + \"-\" + this.generation + \"-\" + now;\n        this.project = app.project;\n        this.itemIndex = 1; this.layerIndex = 1; this.comp = null;\n        this.lines = [\"AE_PLUGIN_CATALOG_V1\", \"AE\\t\" + clean(app.version)];\n        this.effects = []; this.audio = []; this.seen = {}; this.layerErrors = 0;\n        this.aeDone = false; this.sfxDone = false; this.statusReadAt = 0;\n        this.state = { schema: \"codex-ae-library/v1\", state: \"scanning\", sessionId: this.bridge.sessionNonce,\n            generation: this.generation, requestId: this.requestId, afterEffectsVersion: String(app.version),\n            refreshIntervalSeconds: 120, effectsCount: 0, appliedSchemaCount: 0, projectAudioCount: 0, sfxCount: 0,\n            effectsState: \"scanning\", sfxState: \"scanning\", errors: [] };\n        try {\n            cached = readJson(this.root + \"/latest-sfx.json\");\n            if (cached && cached.schemaVersion === 1 && typeof cached.count === \"number\" && isFinite(cached.count) && cached.count >= 0 && cached.count === Math.floor(cached.count)) {\n                var cachedPath = catalogPath(cached);\n                if ((new File(this.bridge.workspaceRoot + \"/\" + cachedPath)).exists) {\n                    this.state.sfxRelativePath = cachedPath;\n                    this.state.sfxCount = cached.count;\n                    this.state.sfxCatalogCached = true;\n                }\n            }\n        } catch (cacheError) { /* Rebuild cache; a corrupt cache must not prevent a fresh scan. *\/ }\n        try {\n            var registered = app.effects;\n            for (i = 0; i < registered.length; i += 1) {\n                e = registered[i];\n                this.effects.push({ displayName: String(e.displayName), matchName: String(e.matchName), category: String(e.category), version: String(e.version) });\n                this.lines.push(\"EFFECT\\t\" + clean(e.displayName) + \"\\t\" + clean(e.matchName) + \"\\t\" + clean(e.category) + \"\\t\" + clean(e.version));\n            }\n            this.state.effectsCount = this.effects.length;\n        } catch (registryError) { this.state.errors.push(\"Effect registry: \" + String(registryError)); }\n        try {\n            config = readJson(this.root + \"/config.json\");\n            if (config && typeof config.refreshIntervalSeconds === \"number\" && config.refreshIntervalSeconds >= 30 && config.refreshIntervalSeconds <= 3600) {\n                this.intervalMs = config.refreshIntervalSeconds * 1000;\n            }\n            this.state.refreshIntervalSeconds = this.intervalMs / 1000;\n            this.bridge.writeNewAtomic(this.root + \"/requests/sfx-\" + this.requestId + \".json\", stringify({\n                schemaVersion: 1, requestId: this.requestId, sessionId: this.bridge.sessionNonce,\n                workspaceRoot: this.bridge.workspaceRoot, createdUtc: new Date(now).toUTCString()\n            }));\n            runtime = readJson(this.root + \"/runtime.json\");\n            if (!runtime || typeof runtime.powerShellPath !== \"string\" || /[%!^&|<>]/.test(runtime.powerShellPath) || !/^[A-Za-z]:\\/[^\"\\r\\n]*\\/pwsh\\.exe$/i.test(runtime.powerShellPath.replace(/\\\\/g, \"/\")) || !(new File(runtime.powerShellPath)).exists) {\n                throw new Error(\"Run tools/Initialize-AeLibrary.ps1 to locate PowerShell\");\n            }\n            var launcher = new File(this.bridge.workspaceRoot + \"/tools/Start-AeSfxCatalog.ps1\");\n            if (!launcher.exists || /[\"\\r\\n%!^&|<>]/.test(launcher.fsName)) { throw new Error(\"SFX launcher unavailable\"); }\n            command = 'cmd.exe /d /s /c \"\"' + runtime.powerShellPath + '\" -NoProfile -NonInteractive -WindowStyle Hidden -File \"' + launcher.fsName + '\" -RequestId \"' + this.requestId + '\"\"';\n            result = system.callSystem(command);\n            // Some Windows AE builds return empty stdout even when the process succeeds.\n            var launched = readJson(this.root + \"/requests/launch-sfx-\" + this.requestId + \".json\");\n            if (!launched || launched.schemaVersion !== 1 || launched.requestId !== this.requestId || launched.state !== \"launched\" || typeof launched.processId !== \"number\" || launched.processId <= 0) {\n                throw new Error(\"SFX helper launch was not acknowledged: \" + clean(result).substr(0, 300));\n            }\n        } catch (launchError) {\n            this.sfxDone = true; this.state.sfxState = \"error\"; this.state.errors.push(String(launchError));\n        }\n        this.publish();\n    };\n    Library.prototype.scanChunk = function () {\n        var deadline = new Date().getTime() + 25, processed = 0, item, layer, parade, effect, i;\n        if (this.project !== app.project) {\n            this.state.errors.push(\"Project changed during inventory; next idle refresh will rescan\");\n            this.finishAe(); return;\n        }\n        while (processed < 6 && new Date().getTime() < deadline) {\n            if (this.comp && this.layerIndex <= this.comp.numLayers) {\n                try {\n                    layer = this.comp.layer(this.layerIndex++);\n                    parade = layer.property(\"ADBE Effect Parade\");\n                    if (parade) {\n                        for (i = 1; i <= parade.numProperties; i += 1) {\n                            effect = parade.property(i);\n                            if (!effect || this.seen[\"$\" + effect.matchName]) { continue; }\n                            this.seen[\"$\" + effect.matchName] = true;\n                            this.lines.push(\"APPLIED\\t\" + clean(effect.matchName) + \"\\t\" + clean(effect.name));\n                            walk(effect, effect.matchName, this.lines, 0); this.state.appliedSchemaCount += 1;\n                        }\n                    }\n                } catch (layerError) { this.layerErrors += 1; }\n            } else {\n                this.comp = null;\n                if (!this.project || this.itemIndex > this.project.numItems) { this.finishAe(); return; }\n                try {\n                    item = this.project.item(this.itemIndex++);\n                    if (item instanceof CompItem) { this.comp = item; this.layerIndex = 1; }\n                    else if (item instanceof FootageItem && item.hasAudio) {\n                        this.audio.push({ id: item.id, name: String(item.name), hasVideo: item.hasVideo,\n                            duration: item.duration, filePath: item.file ? item.file.fsName : null,\n                            available: item.file ? item.file.exists : false });\n                    }\n                } catch (itemError) { this.layerErrors += 1; }\n            }\n            processed += 1;\n        }\n    };\n    Library.prototype.finishAe = function () {\n        var pluginRoot = this.bridge.workspaceRoot + \"/.ae-codex/plugins\", tsv = this.lines.join(\"\\n\"), categories = {}, names = [], i, e, category, index;\n        this.state.effectsState = \"ready\";\n        this.state.projectAudioCount = this.audio.length;\n        if (this.layerErrors) { this.state.errors.push(\"Unavailable project layers/items: \" + this.layerErrors); }\n        var relative = \".ae-codex/library/sessions/\" + this.bridge.sessionNonce + \"/\";\n        this.bridge.writeNewAtomic(this.folder + \"/effects-\" + this.requestId + \".tsv\", tsv);\n        this.bridge.writeNewAtomic(this.folder + \"/project-audio-\" + this.requestId + \".json\", stringify({ schema: \"codex-ae-project-audio/v1\", items: this.audio }));\n        this.state.effectsRelativePath = relative + \"effects-\" + this.requestId + \".tsv\";\n        this.state.projectAudioRelativePath = relative + \"project-audio-\" + this.requestId + \".json\";\n        this.bridge.ensureFolder(pluginRoot);\n        this.bridge.writeAtomic(pluginRoot + \"/effects-and-parameters.tsv\", tsv);\n        for (i = 0; i < this.effects.length; i += 1) {\n            e = this.effects[i]; category = e.category || \"Uncategorized\";\n            if (!categories[\"$\" + category]) { categories[\"$\" + category] = []; names.push(category); }\n            categories[\"$\" + category].push(e);\n        }\n        names.sort(); index = [\"# Effects registered in After Effects\", \"\", \"Automatically refreshed by Codex Bridge. PARAM rows describe already-applied effects only; license and render support are not verified.\", \"\"];\n        for (i = 0; i < names.length; i += 1) {\n            category = names[i]; index.push(\"## \" + category + \" (\" + categories[\"$\" + category].length + \")\", \"\", \"| Effect | Exact matchName | Version |\", \"|---|---|---|\");\n            var list = categories[\"$\" + category], j;\n            for (j = 0; j < list.length; j += 1) { e = list[j]; index.push(\"| \" + clean(e.displayName).replace(/\\|/g, \"\\\\|\") + \" | `\" + e.matchName + \"` | \" + clean(e.version) + \" |\"); }\n            index.push(\"\");\n        }\n        this.bridge.writeAtomic(pluginRoot + \"/effect-index.md\", index.join(\"\\n\"));\n        this.aeDone = true;\n    };\n    Library.prototype.readSfxStatus = function () {\n        var status = readJson(this.folder + \"/status-sfx-\" + this.requestId + \".json\");\n        if (!status) { return; }\n        if (status.requestId !== this.requestId || status.sessionId !== this.bridge.sessionNonce || (status.state !== \"success\" && status.state !== \"error\")) { throw new Error(\"Foreign or invalid SFX status\"); }\n        if (status.state === \"success\") {\n            var prefix = \".ae-codex/library/sessions/\" + this.bridge.sessionNonce + \"/\";\n            if (status.schemaVersion !== 1 || status.kind !== \"disk-sfx\" || typeof status.count !== \"number\" || status.count < 0 || status.count !== Math.floor(status.count) ||\n                    status.summaryRelativePath !== prefix + \"summary-sfx-\" + this.requestId + \".json\") { throw new Error(\"Invalid SFX catalog metadata\"); }\n            var validatedCatalogPath = catalogPath(status);\n            this.state.sfxCount = status.count;\n            this.state.sfxRelativePath = validatedCatalogPath;\n            this.state.sfxCatalogCached = false;\n            this.state.sfxCatalogReused = status.reusedCatalog === true;\n            this.state.sfxSummaryRelativePath = status.summaryRelativePath;\n            this.state.sfxState = \"ready\";\n            this.state.sfxWarnings = status.warnings || [];\n            this.state.pendingArchiveCount = status.pendingArchiveCount || 0;\n        } else { this.state.sfxState = \"error\"; this.state.errors.push(\"SFX scan: \" + String(status.error || status.message || \"failed\")); }\n        this.sfxDone = true;\n    };\n    Library.prototype.tick = function () {\n        if (!this.active || !this.bridge.running || this.generation !== this.bridge.generation) { return; }\n        try {\n            var now = new Date().getTime();\n            if (!this.aeDone) { this.scanChunk(); }\n            if (!this.sfxDone && now - this.statusReadAt >= 1000) {\n                this.statusReadAt = now;\n                try { this.readSfxStatus(); } catch (statusError) { this.sfxDone = true; this.state.sfxState = \"error\"; this.state.errors.push(String(statusError)); }\n                if (!this.sfxDone && now - this.lastRefresh > 300000) { this.sfxDone = true; this.state.sfxState = \"error\"; this.state.errors.push(\"SFX scan timed out; cached catalog retained\"); }\n            }\n            if (this.aeDone && this.sfxDone) {\n                if (this.state.state === \"scanning\") {\n                    this.state.state = this.state.errors.length ? \"partial\" : \"ready\";\n                    this.publish();\n                }\n                if (now - this.lastRefresh >= this.intervalMs) { this.refresh(); }\n            }\n        } catch (inventoryError) {\n            this.aeDone = true; this.sfxDone = true; this.state.state = \"error\";\n            this.state.errors.push(String(inventoryError));\n            try { this.publish(); } catch (publicationError) { /* Keep bridge jobs usable. *\/ }\n        }\n    };\n    Library.prototype.stop = function () {\n        this.active = false;\n        this.state.state = \"stopped\";\n        try { this.publish(); } catch (stopError) { /* Stop must always work. *\/ }\n    };\n    Library.prototype.describe = function () {\n        if (this.state.state === \"stopped\") { return \"Library: disconnected\"; }\n        return \"Library: \" + this.state.effectsCount + \" effects | \" + this.state.projectAudioCount + \" project audio | \" + this.state.sfxCount + \" SFX (\" + this.state.state + \")\";\n    };\n    Library.prototype.heartbeat = function () {\n        return { state: this.state.state, manifestRelativePath: \".ae-codex/library/current.json\", requestId: this.requestId || \"\", effectsCount: this.state.effectsCount, sfxCount: this.state.sfxCount };\n    };\n    $.global.__codexAeLibraryFactoryV1 = function (bridge) { return new Library(bridge); };\n    $.global.__codexAeLibraryJsonV1 = stringify;\n}());\n"
 "(function () {\r\n    if (!app.project) throw new Error('No project');\r\n    var existingSecond=null; var source = null, newName = 'Pickle - Goofy Provocation - 10s';\r\n    for (var n = 1; n <= app.project.numItems; n++) {\r\n        var it = app.project.item(n);\r\n        if (it instanceof CompItem && it.name === 'Pickle - Separate Vector Layers') source = it;\r\n        if (it instanceof CompItem && it.name === newName) existingSecond=it;\r\n    }\r\n    if (!source || !source.layer('CTRL - Taunt Motion') || !existingSecond || existingSecond.layer('CTRL - Taunt Motion')) throw new Error('Unexpected source state');\r\n    var required = ['Body','Stem','Arm_Left','Arm_Right','Leg_Left','Leg_Right','Mouth','Brow_Left','Brow_Right','CTRL - Eye Left','CTRL - Eye Right'];\r\n    for (var q = 0; q < required.length; q++) if (!source.layer(required[q])) throw new Error('Missing '+required[q]);\r\n    function tr(l) { return l.property('ADBE Transform Group'); }\r\n    function set(p, e) { if (!p || !p.canSetExpression) throw new Error('Missing expression property'); p.expression = e; }\r\n    function shape(v, closed, factor) {\r\n        var s = new Shape(), ins = [], outs = [];\r\n        for (var k = 0; k < v.length; k++) {\r\n            var prev = v[closed ? (k+v.length-1)%v.length : Math.max(0,k-1)], next = v[closed ? (k+1)%v.length : Math.min(v.length-1,k+1)];\r\n            var dx=(next[0]-prev[0])*factor, dy=(next[1]-prev[1])*factor;\r\n            ins.push(!closed&&k===0?[0,0]:[-dx,-dy]); outs.push(!closed&&k===v.length-1?[0,0]:[dx,dy]);\r\n        }\r\n        s.vertices=v; s.inTangents=ins; s.outTangents=outs; s.closed=closed; return s;\r\n    }\r\n    function ellipse(x,y,rx,ry) {\r\n        var s=new Shape(),h=0.55228475;s.vertices=[[x+rx,y],[x,y+ry],[x-rx,y],[x,y-ry]];\r\n        s.inTangents=[[0,-ry*h],[rx*h,0],[0,ry*h],[-rx*h,0]];s.outTangents=[[0,ry*h],[-rx*h,0],[0,-ry*h],[rx*h,0]];s.closed=true;return s;\r\n    }\r\n    function group(l,name,s,col,width) {\r\n        var r=l.property('ADBE Root Vectors Group'),g=r.addProperty('ADBE Vector Group');g.name=name;\r\n        var c=g.property('ADBE Vectors Group'),p=c.addProperty('ADBE Vector Shape - Group');p.property('ADBE Vector Shape').setValue(s);\r\n        if(width){var st=c.addProperty('ADBE Vector Graphic - Stroke');st.property('ADBE Vector Stroke Color').setValue(col);st.property('ADBE Vector Stroke Width').setValue(width);st.property('ADBE Vector Stroke Line Cap').setValue(2);st.property('ADBE Vector Stroke Line Join').setValue(2);}\r\n        else{var f=c.addProperty('ADBE Vector Graphic - Fill');f.property('ADBE Vector Fill Color').setValue(col);}\r\n        return r.property(name).property('ADBE Vectors Group').property('ADBE Vector Shape - Group').property('ADBE Vector Shape');\r\n    }\r\n    function hideArtwork(l) {\r\n        var r=l.property('ADBE Root Vectors Group');for(var k=1;k<=r.numProperties;k++){var c=r.property(k).property('ADBE Vectors Group');if(c){var f=c.property('ADBE Vector Graphic - Fill');if(f)f.property('ADBE Vector Fill Opacity').setValue(0);var st=c.property('ADBE Vector Graphic - Stroke');if(st)st.property('ADBE Vector Stroke Opacity').setValue(0);}}\r\n    }\r\n    function encode(a){var s=[];for(var k=0;k<a.length;k++)s.push('['+a[k][0]+','+a[k][1]+']');return '['+s.join(',')+']';}\r\n    function path(l,name){return l.property('ADBE Root Vectors Group').property(name).property('ADBE Vectors Group').property('ADBE Vector Shape - Group').property('ADBE Vector Shape');}\r\n    function resetTransform(l,anchor,position) {\r\n        l.locked=false;l.threeDLayer=false;var t=tr(l),ps=['ADBE Anchor Point','ADBE Position','ADBE Scale','ADBE Rotate Z','ADBE Opacity'];\r\n        for(var k=0;k<ps.length;k++){var p=t.property(ps[k]);p.expression='';while(p.numKeys)p.removeKey(p.numKeys);}\r\n        t.property('ADBE Anchor Point').setValue(anchor);t.property('ADBE Position').setValue(position);t.property('ADBE Scale').setValue([100,100]);t.property('ADBE Rotate Z').setValue(0);t.property('ADBE Opacity').setValue(100);\r\n    }\r\n    function build(c,variant) {\r\n        c.duration=10;c.frameRate=30;c.workAreaStart=0;c.workAreaDuration=10;\r\n        var ctrl=c.layers.addNull(10);ctrl.name='CTRL - Taunt Motion';ctrl.label=9;\r\n        resetTransform(ctrl,[385.5,680],[385.5,655]);tr(ctrl).property('ADBE Scale').setValue([88,88]);\r\n        var code = variant===0 ?\r\n            'var a=time*2*Math.PI/1.2;var s=Math.sin(a),h=15*Math.sin(a-0.15);var lean=155*s+20*Math.sin(2*a);var bob=-18-18*Math.cos(2*a);var tilt=-lean/930*180/Math.PI;' :\r\n            'var a=time*2*Math.PI/0.8;var s=Math.sin(a),h=18*Math.sin(a-0.2);var lean=76*s+22*Math.sin(3*a+0.3);var bob=-22-22*Math.cos(2*a);var tilt=-lean/930*180/Math.PI;';\r\n        code+='function at(x,y){return [x+h+lean*(1120-y)/930,y+bob];}';\r\n        var body=c.layer('Body');resetTransform(body,[365,650],[365,650]);body.setParentWithJump(ctrl);\r\n        var r=body.property('ADBE Root Vectors Group');\r\n        for(var k=1;k<=r.numProperties;k++){\r\n            var g=r.property(k),p=g.property('ADBE Vectors Group').property('ADBE Vector Shape - Group').property('ADBE Vector Shape'),v=p.value;\r\n            set(p,code+'var v='+encode(v.vertices)+',ins='+encode(v.inTangents)+',outs='+encode(v.outTangents)+';for(var j=0;j<v.length;j++){v[j]=at(v[j][0],v[j][1]);ins[j]=[ins[j][0]-lean*ins[j][1]/930,ins[j][1]];outs[j]=[outs[j][0]-lean*outs[j][1]/930,outs[j][1]];}createPath(v,ins,outs,true);');\r\n        }\r\n        var stem=c.layer('Stem');resetTransform(stem,[343,195],[343,195]);stem.setParentWithJump(ctrl);set(tr(stem).property('ADBE Position'),code+'at(343,195);');set(tr(stem).property('ADBE Rotate Z'),code+'tilt+5*Math.sin(a-0.5);');\r\n        var green=[66/255,105/255,0], sides=['Left','Right'];\r\n        for(var i=0;i<2;i++){\r\n            var left=i===0,side=sides[i],arm=c.layer('Arm_'+side),leg=c.layer('Leg_'+side);\r\n            resetTransform(arm,[0,0],[0,0]);arm.setParentWithJump(ctrl);hideArtwork(arm);\r\n            var wrist,elbow;\r\n            if(variant===0){\r\n                wrist=left?'[52+43*Math.sin(a+0.3),805+80*Math.cos(a+0.25)]':'[706+28*Math.sin(a+0.45),704+38*Math.sin(a-0.5)]';\r\n                elbow=left?'[112+18*s,755+38*Math.cos(a)]':'[621+17*s,779+24*Math.sin(a-0.2)]';\r\n            }else{\r\n                wrist=left?'[108+32*Math.sin(a+0.3),447+72*Math.cos(a+0.7)]':'[659+38*Math.sin(a-0.2),479-68*Math.cos(a+0.4)]';\r\n                elbow=left?'[79+25*Math.sin(a-0.3),648+40*Math.cos(a)]':'[692+24*Math.sin(a+0.3),670-36*Math.cos(a)]';\r\n            }\r\n            var armCode=code+'var shoulder=at('+(left?'196,684':'536,684')+');var elbow='+elbow+';var wrist='+wrist+';elbow[1]+=bob;wrist[1]+=bob*0.35;';\r\n            p=group(arm,'Smooth arm',shape([[0,0],[1,1],[2,2]],false,0.2),green,33);\r\n            set(p,armCode+'createPath([shoulder,elbow,wrist],[[0,0],[(shoulder[0]-wrist[0])*0.16,(shoulder[1]-wrist[1])*0.16],[(elbow[0]-wrist[0])*0.25,(elbow[1]-wrist[1])*0.25]],[[(elbow[0]-shoulder[0])*0.35,(elbow[1]-shoulder[1])*0.35],[(wrist[0]-shoulder[0])*0.16,(wrist[1]-shoulder[1])*0.16],[0,0]],false);');\r\n            var hand=c.layers.addShape();hand.name='Hand_'+side+' - Four rounded fingers';hand.label=10;resetTransform(hand,[0,0],[0,0]);hand.setParentWithJump(ctrl);group(hand,'Palm',ellipse(0,0,21,19),green,0);\r\n            for(var f=0;f<4;f++){\r\n                var x=-15+f*10,y=-11,len=variant===0?15+7*Math.sin(f*0.9):((f===1||f===2)?24:12);\r\n                group(hand,'Finger '+(f+1),shape([[x,y],[x+(f-1.5)*3,y-len]],false,0),green,11);\r\n            }\r\n            set(tr(hand).property('ADBE Position'),armCode+'wrist;');\r\n            set(tr(hand).property('ADBE Rotate Z'),code+(variant===0?(left?'(-65+24*Math.sin(a+0.6));':'(55+24*Math.sin(a-0.4));'):(left?'(-12+24*Math.sin(a+0.5));':'(12-24*Math.sin(a-0.3));')));\r\n            arm.moveBefore(body);hand.moveBefore(arm);\r\n            resetTransform(leg,[0,0],[0,0]);leg.setParentWithJump(ctrl);hideArtwork(leg);\r\n            var ankleX=left?258:514,hipX=left?300:484,kneeX=left?236:535;\r\n            var legCode=code+'var hip=at('+hipX+',1052),ankle=['+ankleX+',1244];var knee=['+kneeX+'-20*s,1167+8*Math.sin(a'+(left?'+0.35':'-0.35')+')+bob*0.45];';\r\n            p=group(leg,'Continuous bent leg',shape([[0,0],[1,1],[2,2]],false,0.14),green,38);\r\n            set(p,legCode+'createPath([hip,knee,ankle],[[0,0],[(hip[0]-ankle[0])*0.14,(hip[1]-ankle[1])*0.14],[(knee[0]-ankle[0])*0.24,(knee[1]-ankle[1])*0.24]],[[(knee[0]-hip[0])*0.32,(knee[1]-hip[1])*0.32],[(ankle[0]-hip[0])*0.14,(ankle[1]-hip[1])*0.14],[0,0]],false);');\r\n            p=group(leg,'Attached rocking foot',ellipse(ankleX+(left?-18:18),1250,44,22),green,0);\r\n            var ft=p.value;\r\n            set(p,code+'var angle=4*Math.sin(a'+(left?'+0.3':'-0.3')+')*Math.PI/180;var co=Math.cos(angle),si=Math.sin(angle),v='+encode(ft.vertices)+',ins='+encode(ft.inTangents)+',outs='+encode(ft.outTangents)+';for(var j=0;j<v.length;j++){var x=v[j][0]-'+ankleX+',y=v[j][1]-1244;v[j]=['+ankleX+'+x*co-y*si,1244+x*si+y*co];var ix=ins[j][0],iy=ins[j][1],ox=outs[j][0],oy=outs[j][1];ins[j]=[ix*co-iy*si,ix*si+iy*co];outs[j]=[ox*co-oy*si,ox*si+oy*co];}createPath(v,ins,outs,true);');\r\n            leg.moveAfter(body);\r\n            var eye=c.layer('CTRL - Eye '+side);resetTransform(eye,[0,0],[left?273:423,426]);eye.setParentWithJump(ctrl);\r\n            set(tr(eye).property('ADBE Position'),code+'at('+(left?273:423)+',426);');set(tr(eye).property('ADBE Rotate Z'),code+'tilt;');\r\n            var pupil=c.layer('Eye_'+side+'_Pupil');var local=tr(pupil).property('ADBE Position').value;tr(pupil).property('ADBE Position').expression='';\r\n            var look=variant===0?'var z=2*Math.sin(time*2*Math.PI/1.2'+(left?'+0.15':'+1.0')+');var e=Math.exp(2*z);var x=24*(e-1)/(e+1);var y=3*Math.sin(time*2*Math.PI/1.2'+(left?'':'+0.6')+');':\r\n                'var cross=Math.pow(0.5+0.5*Math.sin(time*2*Math.PI/2+0.8),2);var x=(1-cross)*26*Math.sin(time*2*Math.PI/'+(left?'0.94+0.2':'1.23+2.4')+')'+(left?'+26*cross':'-26*cross')+';var y='+(left?'-4-7*cross':'5+8*cross')+';';\r\n            set(tr(pupil).property('ADBE Position'),look+'['+local[0]+'+x,'+local[1]+'+y];');\r\n            var blink='var t=time%'+(variant===0?'3.2':'2.6')+';function pulse(center){var d=Math.abs(t-center);return d<0.1?0.5+0.5*Math.cos(Math.PI*d/0.1):0;}var b=Math.max(pulse(0.76),pulse(0.98));';\r\n            if(variant===1&&!left)blink+='var d=Math.abs(t-1.75);b=Math.max(b,d<0.19?0.5+0.5*Math.cos(Math.PI*d/0.19):0);';\r\n            set(eye.effect('Open Upper')(1),blink+'100-'+(variant===0?'67':'70')+'*b;');\r\n            set(eye.effect('Open Lower')(1),blink+'100-'+(variant===0?'39':'36')+'*b;');\r\n            var brow=c.layer('Brow_'+side);resetTransform(brow,[left?273:423,335],[left?273:423,335]);brow.setParentWithJump(ctrl);\r\n            set(tr(brow).property('ADBE Position'),code+'var p=at('+(left?273:423)+',335);[p[0],p[1]-'+(variant===0?'5':'10')+'*(1+Math.sin(a'+(left?'+0.4':'-0.4')+'))];');\r\n            set(tr(brow).property('ADBE Rotate Z'),code+'tilt'+(left?'+':'-')+(variant===0?'12':'5')+'+'+(variant===0?'5':'10')+'*Math.sin(a'+(left?'+0.2':'-0.2')+');');\r\n            brow.moveBefore(hand);\r\n        }\r\n        var mouth=c.layer('Mouth');resetTransform(mouth,[366,552],[366,552]);mouth.setParentWithJump(ctrl);set(tr(mouth).property('ADBE Position'),code+'at(366,552);');set(tr(mouth).property('ADBE Rotate Z'),code+'tilt;');\r\n        for(i=1;i<=4;i++){\r\n            p=path(mouth,'Mouth detail '+i);var v=p.value.vertices;\r\n            set(p,'var a=time*2*Math.PI/'+(variant===0?'1.2':'0.8')+';var v='+encode(v)+';for(var j=0;j<v.length;j++){var x=v[j][0],y=v[j][1];v[j]=[366+(x-366)*(1+0.035*Math.sin(a+0.25)),y+8*Math.sin(2*a-0.3)*Math.max(0,Math.min(1,(y-490)/128))+2*Math.sin(a-0.3)];}var ins=[],outs=[];for(var k=0;k<v.length;k++){var prev=v[(k+v.length-1)%v.length],next=v[(k+1)%v.length];var dx=(next[0]-prev[0])*0.155,dy=(next[1]-prev[1])*0.155;ins.push([-dx,-dy]);outs.push([dx,dy]);}createPath(v,ins,outs,true);');\r\n        }\r\n        mouth.property('ADBE Root Vectors Group').property('Mouth detail 5').property('ADBE Vectors Group').property('ADBE Vector Graphic - Fill').property('ADBE Vector Fill Opacity').setValue(0);\r\n        var tongue=c.layers.addShape();tongue.name='Tongue - Soft Taunt';tongue.label=1;resetTransform(tongue,[361,581],[361,581]);tongue.setParentWithJump(mouth);\r\n        set(tr(tongue).property('ADBE Position'),'var a=time*2*Math.PI/'+(variant===0?'1.2':'0.8')+';[366+(361-366)*(1+0.035*Math.sin(a+0.25)),581+5.8*Math.sin(2*a-0.3)+2*Math.sin(a-0.3)];');\r\n        var tongueCode='var a=time*2*Math.PI/'+(variant===0?'0.72':'0.48')+';var swing='+(variant===0?'15':'20')+'*Math.sin(a-0.5)+3*Math.sin(2*a-0.9);var curl=6*Math.sin(a-0.9);var tx=403+swing,ty=623+5*Math.sin(2*a-0.5);';\r\n        p=group(tongue,'Rounded tongue',ellipse(365,600,30,20),[0.95,0.36,0.48],0);\r\n        set(p,tongueCode+'var v=[[333,591],[353,580],[373,582],[393+curl,591],[tx+12,ty-1],[tx+2,ty+13],[tx-18,ty+13],[366+curl,618],[342,607]];var ins=[],outs=[];for(var k=0;k<v.length;k++){var prev=v[(k+v.length-1)%v.length],next=v[(k+1)%v.length];var dx=(next[0]-prev[0])*0.16,dy=(next[1]-prev[1])*0.16;ins.push([-dx,-dy]);outs.push([dx,dy]);}createPath(v,ins,outs,true);');\r\n        p=group(tongue,'Round crease',shape([[365,590],[383,605],[400,625]],false,0.2),[0.78,0.21,0.33],4);\r\n        set(p,tongueCode+'createPath([[365,590],[383+curl,605],[tx-3,ty+2]],[[0,0],[-8,-7],[-8,-2]],[[5,7],[8,7],[0,0]],false);');\r\n        tongue.moveBefore(mouth);mouth.moveBefore(c.layer('Hand_Right - Four rounded fingers'));\r\n        var stack=['Outline','White','Pupil','Lid_Lower','Lid_Upper'];for(i=0;i<2;i++)for(k=0;k<stack.length;k++){var el=c.layer('Eye_'+sides[i]+'_'+stack[k]);if(el)el.moveBefore(mouth);}\r\n        for(i=1;i<=c.numLayers;i++){var l=c.layer(i),wasLocked=l.locked;l.locked=false;l.outPoint=10;if(l.enabled)l.solo=false;l.motionBlur=false;l.selected=false;l.locked=wasLocked;}\r\n        c.hideShyLayers=true;c.motionBlur=false;c.time=0.25;c.comment=variant===0?'Reference 15-17.4s taunt extended to 10s: leaning body, planted rocking feet, bending knees, low swinging left arm and palm-up right arm, rolling eyes and short soft tongue. Native separate vectors retained.':'Distinct 10s goofy provocation: faster body bounce, alternating raised four-finger hands, crossed/independent pupils, asymmetric brows, wink and quicker rounded tongue wag.';\r\n        ctrl.comment='Uniform placement only. Body, shoulder and hip attachment share the same smooth motion formula. Feet remain planted with small ankle rocking.';\r\n        var check=[tr(c.layer('CTRL - Eye Left')).property('ADBE Position'),tr(c.layer('CTRL - Eye Right')).property('ADBE Position'),path(tongue,'Rounded tongue')];\r\n        for(i=0;i<check.length;i++){for(k=0;k<10;k++)check[i].valueAtTime(k+0.2,false);if(check[i].expressionError)throw new Error(check[i].expressionError);}\r\n    }\r\n    app.beginUndoGroup('Create two different 10 second pickle taunts');\r\n    try{\r\n        var second=existingSecond;\r\n        for(var z=1;z<=source.numLayers;z++){var ll=source.layer(z),locked=ll.locked;ll.locked=false;ll.outPoint=10;if(ll.enabled)ll.solo=false;ll.motionBlur=false;ll.selected=false;ll.locked=locked;}source.hideShyLayers=true;source.time=0.25;source.comment='10s taunt inspired by reference 15-17.4s: leaning body, low swinging arm, palm-up hand, bent knees, attached rocking feet, independent eyelids and soft tongue.';build(second,1);second.openInViewer();\r\n        return 'Two distinct 10-second animations: '+source.name+' (reference 15-18s, original comp, '+source.numLayers+' layers); '+second.name+' (new goofy raised-hand/wink/cross-eyed taunt, '+second.numLayers+' layers). Both '+source.width+'x'+source.height+' at 30fps. Separate hands, pupils, upper/lower lids, brows, mouth and soft attached tongue. No project saved.';\r\n    }finally{app.endUndoGroup();}\r\n}());\r\n"
 "(function () {\n    if (!app.project) throw new Error('No project');\n    var source = null, newName = 'Pickle - Goofy Provocation - 10s';\n    for (var n = 1; n <= app.project.numItems; n++) {\n        var it = app.project.item(n);\n        if (it instanceof CompItem && it.name === 'Pickle - Separate Vector Layers') source = it;\n        if (it instanceof CompItem && it.name === newName) throw new Error('Variant already exists; do not resubmit');\n    }\n    if (!source || source.layer('CTRL - Taunt Motion')) throw new Error('Unexpected source state');\n    var requ"
 "\n   "
@@ -7807,9 +8470,7 @@ m02041%3A0%3A63%7Cm01144%3A0%3A115%7Cm02044%3A0%3A217
 "\n return 'SUCCESS45s comp and work area; two fully-filled tile reactions only36-36.9 and39.15-39.9;15 audio tracks100% speed; deleted unused layers absent; no expression errors; hand ends40.5; original outro40.5-45. Frames dispatched .ae-codex/inspection/'+ctx.runId;\n}());\n"
 "(function(){var comp=null;for(var n=1;n<=app.project.numItems;n++){var c=app.project.item(n);if(c instanceof CompItem&&c.name==='Pickle - Funny Motion - 10s')comp=c;}if(!comp)throw new Error('No animated comp');var errors=[],bonesCount=0;app.beginUndoGroup('Validate and label eye rig');try{\n function walk(g,label){for(var j"
 "Error)errors.push(label+'/'+p.name+': '+p.expressionError);}else walk(p,label+'/'+p.name);}}\n var names=['Body','Arm_Left','Arm_Right','Leg_Left','Leg_Right'];for(var i=0;i<names.length;i++){var l=comp.layer(names[i]),b=l.property('ADBE Effect Parade').property('BAO_Bones');if(!b||!b.enabled||!(l.source instanceof CompItem))throw new Error('Missing full canvas Bones rig '+names[i]);bonesCount++;walk(b,names[i]);}\n var eyes=['Eye_Left','Eye_Right'];for(i=0;i<2;i++){var suffixes=['',' - White',' - Pupil',' - Upper Lid',' - Lower Lid',' - Lid Matte'];for(var q=0;q<suffixes.length;q++){var l=comp.layer(eyes[i]+suffixes[q]);if(!l)throw new Error('Missing split eye '+eyes[i]+suffixes[q]);var p=l.property('ADBE Transform Group').property('ADBE Scale');if(p.expression!=='[100,100];')throw new Error('Eyeball scaling remains');walk(l,l.name);l.label=(suffixes[q].indexOf('Lid')>=0?3:9);}if(!comp.layer(eyes[i]+' - Upper Lid').hasTrackMatte||!comp.layer(eyes[i]+' - Lower Lid').hasTrackMatte)throw new Error('Missing eyelid matte');}\n var feet=['Foot_Left','Foot_Right'];for(i=0;i<2;i++){var l=comp.layer(feet[i]),p=l.property('ADBE Transform Group').property('ADBE Position');if(p.numKeys||p.expressionEnabled)throw new Error('Foot position animated');}\n if(errors.length)throw new Error(errors.join('\\n'));\n comp.time=0.4;comp.openInViewer();var text='{\"composition\":\"Pickle - Funny Motion - 10s\",\"duration\":10,\"size\":[1080,1920],\"enabledBonesRigs\":5,\"eyePartsPerSide\":[\"rim\",\"white\",\"pupil\",\"upperLid\",\"lowerLid\",\"matte\"],\"eyeScaleFixed\":true,\"feetPlanted\":true,\"expressionErrors\":[],\"visualFramesReviewed\":9}';var f=new File(String($.global.__CODEX_AE_RUN_CONTEXT__.workspaceRoot)+'/.ae-codex/results/pickle-bones-lids-validation.json');f.encoding='UTF-8';if(!f.open('w'))throw new Error('Cannot write validation');try{f.write(text);}finally{f.close();}\n return 'Verified 5 active BAO Bones rigs, 12 independent eye component layers, fixed eye scale, working lid mattes, planted feet, zero expression errors. 10s animation ready.';\n}finally{app.endUndoGroup();}}());\n\r\n"
-"/* Read-only inventory of registered effects and already-applied parameters. *\/\n(function () {\n    if (!app.project) { throw new Error(\"No After Effects project\"); }\n    var lines = [\"AE_PLUGIN_CATALOG_V1\", \"AE\\t\" + app.version];\n    var effects = app.effects;\n    var seen = {};\n    var i, j, k, comp, layer, parade, effect;\n    function clean(value) { return String(value).replace(/[\\t\\r\\n]/g, \" \"); }\n    function walk(group, path, depth) {\n        var n, p, value, range;\n        for (n = 1; n <= group.numProperties; n += 1) {\n            p = group.property(n);\n            if (!p) { continue; }\n            range = \"\";\n            value ="
-"    if (p.propertyValueType !== PropertyValueType.CUSTOM_VALUE &&\n                            p.propertyValueType !== PropertyValueType.NO_VALUE) {\n                        value = clean(p.value);\n                    }\n                } catch (valueError) { valu"
-"\n                clean(p.name) + \"\\t\" + p.propertyType + \"\\t\" + range + \"\\t\" + value);\n            if (p.propertyType !== PropertyType.PROPERTY && depth < 8) {\n                walk(p, path + \"/\" + p.matchName, depth + 1);\n            }\n        }\n    }\n    for (i = 0; i < effects.length; i += 1) {\n        lines.push(\"EFFECT\\t\" + clean(effects[i].displayName) + \"\\t\" +\n            clean(effects[i].matchName) + \"\\t\" + clean(effects[i].category) + \"\\t\" +\n            clean(effects[i].version));\n    }\n    for (i = 1; i <= app.project.numItems; i += 1) {\n        comp = app.project.item(i);\n        if (!(comp instanceof CompItem)) { continue; }\n        for (j = 1; j <= comp.numLayers; j += 1) {\n            layer = comp.layer(j);\n            parade = layer.property(\"ADBE Effect Parade\");\n            if (!parade) { continue; }\n            for (k = 1; k <= parade.numProperties; k += 1) {\n                effect = parade.property(k);\n                if (!effect || seen[\"$\" + effect.matchName]) { continue; }\n                seen[\"$\" + effect.matchName] = true;\n                lines.push(\"APPLIED\\t\" + clean(effect.matchName) + \"\\t\" + clean(effect.name));\n                walk(effect, effect.matchName, 0);\n            }\n        }\n    }\n    return lines.join(\"\\n\");\n}());\n"
+"/* Read-only inventory of registered effects and already-applied parameters. *\/\n(function () {\n    if (!app.project) { throw new Error(\"No After Effects project\"); }\n    var lines = [\"AE_PLUGIN_CATALOG_V1\", \"AE\\t\" + app.version];\n    var effects = app.effects;\n    var seen = {};\n    var i, j, k, comp, layer, parade, effect;\n    function clean(value) { return String(value).replace(/[\\t\\r\\n]/g, \" \"); }\n    function walk(group, path, depth) {\n        var n, p, value, range;\n        for (n = 1; n <= group.numProperties; n += 1) {\n            p = group.property(n);\n            if (!p) { continue; }\n            range = \"\";\n            value = \"\";\n            if (p.propertyType === PropertyType.PROPERTY) {\n                try {\n                    if (p.hasMin) { range += \"min=\" + p.minValue + \" \"; }\n                    if (p.hasMax) { range += \"max=\" + p.maxValue; }\n                    if (p.propertyValueType !== PropertyValueType.CUSTOM_VALUE &&\n                            p.propertyValueType !== PropertyValueType.NO_VALUE) {\n                        value = clean(p.value);\n                    }\n                } catch (valueError) { value = \"unavailable\"; }\n            }\n            lines.push(\"PARAM\\t\" + clean(path) + \"\\t\" + clean(p.matchName) + \"\\t\" +\n                clean(p.name) + \"\\t\" + p.propertyType + \"\\t\" + range + \"\\t\" + value);\n            if (p.propertyType !== PropertyType.PROPERTY && depth < 8) {\n                walk(p, path + \"/\" + p.matchName, depth + 1);\n            }\n        }\n    }\n    for (i = 0; i < effects.length; i += 1) {\n        lines.push(\"EFFECT\\t\" + clean(effects[i].displayName) + \"\\t\" +\n            clean(effects[i].matchName) + \"\\t\" + clean(effects[i].category) + \"\\t\" +\n            clean(effects[i].version));\n    }\n    for (i = 1; i <= app.project.numItems; i += 1) {\n        comp = app.project.item(i);\n        if (!(comp instanceof CompItem)) { continue; }\n        for (j = 1; j <= comp.numLayers; j += 1) {\n            layer = comp.layer(j);\n            parade = layer.property(\"ADBE Effect Parade\");\n            if (!parade) { continue; }\n            for (k = 1; k <= parade.numProperties; k += 1) {\n                effect = parade.property(k);\n                if (!effect || seen[\"$\" + effect.matchName]) { continue; }\n                seen[\"$\" + effect.matchName] = true;\n                lines.push(\"APPLIED\\t\" + clean(effect.matchName) + \"\\t\" + clean(effect.name));\n                walk(effect, effect.matchName, 0);\n            }\n        }\n    }\n    return lines.join(\"\\n\");\n}());\n"
 "/* Locate Movie_003 sources and layers without changing the project. *\/\n(function () {\n    var project = app.project;\n    var lines = [];\n    var itemIndex;\n    var item;\n    var layerIndex;\n    var layer;\n    var source;\n    var normalizedName;\n\n    function matches(value) {\n        var normalized = String(value || \"\").toLowerCase();\n        return normalized.indexOf(\"movie_003\") !== -1 ||\n            normalized.indexOf(\"movie 003\") !== -1;\n    }\n\n    function filePath(targetItem) {\n        try {\n            if (targetItem instanceof FootageItem && targetItem.file) {\n                return targetItem.file.fsName;\n            }\n        } catch (error) {\n            return \"FILE_ERROR:\" + error.toString();\n        }\n        return \"none\";\n    }\n\n    if (!project) {\n        throw new Error(\"No After Effects project is open.\");\n    }\n\n    lines.push(\"project=\" + (project.file ? project.file.fsName : \"unsaved\"));\n\n    for (itemIndex = 1; itemIndex <= project.numItems; itemIndex += 1) {\n        item = project.item(itemIndex);\n        normalizedName = item ? item.name : \"\";\n        if (item && matches(normalizedName)) {\n            lines.push(\n                \"item[\" + itemIndex + \"]=\" + item.name +\n                \"|type=\" + item.typeName +\n                \"|duration=\" + (item.duration !== undefined ? item.duration : \"n/a\") +\n                \"|frameRate=\" + (item.frameRate !== undefined ? item.frameRate : \"n/a\") +\n                \"|size=\" + (item.width !== undefined ? item.width + \"x\" + item.height : \"n/a\") +\n                \"|file=\" + filePath(item)\n            );\n        }\n\n        if (item instanceof CompItem) {\n            for (layerIndex = 1; layerIndex <= item.numLayers; layerIndex += 1) {\n                layer = item.layer(layerIndex);\n                source = layer.source;\n                if (matches(layer.name) || (source && matches(source.name))) {\n                    lines.push(\n                        \"layer=\" + item.name + \"[\" + layerIndex + \"]/\" + layer.name +\n                        \"|source=\" + (source ? source.name : \"none\") +\n                        \"|in=\" + layer.inPoint +\n                        \"|out=\" + layer.outPoint +\n                        \"|start=\" + layer.startTime +\n                        \"|stretch=\" + layer.stretch +\n                        \"|file=\" + (source ? filePath(source) : \"none\")\n                    );\n                }\n            }\n        }\n    }\n\n    if (lines.length === 1) {\n        lines.push(\"NOT_FOUND\");\n    }\n\n    return lines.join(\"\\n\");\n}());\n"
 "/* Update the user-installed Codex Bridge panel from the workspace source. *\/\n(function () {\n    var versionMatch = String(app.version).match(/^(\\d+\\.\\d+)/);\n    var versionFolder = versionMatch ? versionMatch[1] : \"26.5\";\n    var source = new File(\"C:/Users/nguye/AE_Codex/jsx/Codex Bridge.jsx\");\n    var panelFolder = new Folder(\n        Folder.userData.fsName + \"/Adobe/After Effects/\" +\n        versionFolder + \"/Scripts/ScriptUI Panels\"\n    );\n    var destination = new File(panelFolder.fsName + \"/Codex Bridge.jsx\");\n    var originalName = destination.name;\n    var stamp = String(new Date().getTime());\n    var temporary = new File(panelFolder.fsName + \"/Codex Bridge.jsx.tmp-\" + stamp);\n    var backup = new File(panelFolder.fsName + \"/Codex Bridge.jsx.bak-\" + stamp);\n    var sourceData;\n    var writtenData;\n\n    if (!source.exists) {\n        throw new Error(\"Workspace panel source not found: \" + source.fsName);\n    }\n    if (!panelFolder.exists) {\n        throw new Error(\"Installed ScriptUI Panels folder not found: \" + panelFolder.fsName);\n    }\n    if (!destination.exists) {\n        throw new Error(\"Installed Codex Bridge panel not found: \" + destination.fsName);\n    }\n\n    source.encoding = \"BINARY\";\n    if (!source.open(\"r\")) {\n        throw new Error(\"Cannot read workspace panel source: \" + source.error);\n    }\n    try {\n        sourceData = source.read();\n    } finally {\n        source.close();\n    }\n\n    temporary.encoding = \"BINARY\";\n    if (!temporary.open(\"w\")) {\n        throw new Error(\"Cannot create temporary panel file: \" + temporary.error);\n    }\n    try {\n        temporary.write(sourceData);\n    } finally {\n        temporary.close();\n    }\n\n    temporary.encoding = \"BINARY\";\n    if (!temporary.open(\"r\")) {\n        temporary.remove();\n        throw new Error(\"Cannot verify temporary panel file: \" + temporary.error);\n    }\n    try {\n        writtenData = temporary.read();\n    } finally {\n        temporary.close();\n    }\n\n    if (writtenData !== sourceData) {\n        temporary.remove();\n        throw new Error(\"Temporary panel verification failed\");\n    }\n\n    if (!destination.rename(backup.name)) {\n        temporary.remove();\n        throw new Error(\"Cannot back up installed panel: \" + destination.error);\n    }\n\n    if (!temporary.rename(originalName)) {\n        backup.rename(originalName);\n        throw new Error(\"Cannot publish updated panel: \" + temporary.error);\n    }\n\n    return \"Updated installed panel to workspace version. Backup: \" + backup.fsName;\n}());\n"
 " comp');\n    var names=['Arm_Left','Arm_Right'],i,j;\n    for(i=0;i<2;i++){var l=comp.layer(names[i]),r=l?l.property('ADBE Root Vectors Group'):null;if(!r||!r.property('Rounded index finger')||!r.property('Folded middle finger')||!r.property('Folded ring finger'))throw new Error('Expected four finger hand');}\n    function oval"

@@ -217,8 +217,43 @@ try {
     throw "Cannot read bridge heartbeat: $($_.Exception.Message)"
 }
 
+$catalogPath = Join-Path $workspaceRoot '.ae-codex/functions/catalog.json'
+$expectedBridgeVersion = $null
+if (Test-Path -LiteralPath $catalogPath -PathType Leaf) {
+    try {
+        $catalog = Read-JsonFileWithRetry -Path $catalogPath
+        if ($catalog.schema -eq 'codex-ae-functions-catalog/v1' -and
+            -not [string]::IsNullOrWhiteSpace([string]$catalog.bridgeVersion)) {
+            $expectedBridgeVersion = [string]$catalog.bridgeVersion
+        }
+    } catch {
+        throw "Cannot read installed AE function catalog: $($_.Exception.Message)"
+    }
+}
+
 if ($heartbeat.schema -ne 'codex-ae-heartbeat/v1') {
     throw "Unsupported bridge heartbeat schema: $($heartbeat.schema)"
+}
+$heartbeatWorkspaceRoot = [string](Get-OptionalJsonProperty -Object $heartbeat -Name 'workspaceRoot' -Default '')
+if ([string]::IsNullOrWhiteSpace($heartbeatWorkspaceRoot)) {
+    throw 'Codex AE Bridge heartbeat has no workspace binding. Close and reopen the installed Codex AE panel; no job was dispatched.'
+}
+try {
+    $heartbeatWorkspaceFull = [System.IO.Path]::GetFullPath($heartbeatWorkspaceRoot)
+} catch {
+    throw "Codex AE Bridge heartbeat has an invalid workspace binding: $heartbeatWorkspaceRoot"
+}
+if (-not $heartbeatWorkspaceFull.Equals($workspaceRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw (
+        "Codex AE Bridge workspace does not match the installed runtime (heartbeat=$heartbeatWorkspaceFull, " +
+        "expected=$workspaceRoot). Close and reopen the installed Codex AE panel; no job was dispatched."
+    )
+}
+if ($expectedBridgeVersion -and [string]$heartbeat.bridgeVersion -cne $expectedBridgeVersion) {
+    throw (
+        "Codex AE Bridge version does not match the installed catalog (heartbeat=$($heartbeat.bridgeVersion), " +
+        "expected=$expectedBridgeVersion). Close and reopen the updated Codex AE panel; no job was dispatched."
+    )
 }
 if ($isFunctionRequest -and [version]$heartbeat.bridgeVersion -lt [version]'1.8.0') {
     throw 'Named functions require Bridge 1.8.0 or later. Close and reopen the updated Codex Bridge panel. No job was dispatched.'

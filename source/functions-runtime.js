@@ -317,6 +317,7 @@
         numeric.properties[byId ? "id" : "index"] = { type: "integer", minimum: 1 }; options.push(numeric); return { oneOf: options };
     }
     function inputSchema(definition) {
+        if (definition.options.nativeInputSchema) { return parse(stringify(definition.options.nativeInputSchema)); }
         var requiredFields = { "comp.rebuildMedia": "name", "comp.create": "name", "comp.seek": "time", "layer.inspect": "layer", "layer.text.create": "text", "layer.solid.create": "color", "layer.duplicate": "layer", "layer.update": "layer", "layer.parent": "layer|parent", "property.list": "layer", "property.get": "layer|path", "property.set": "layer|path|value", "property.keyframes": "layer|path|keys", "property.expression": "layer|path|expression", "effect.add": "layer|matchName", "layer.shape.create": "shape", "script.run": "branch" };
         var result = { type: "object", properties: {}, required: requiredFields[definition.name] ? requiredFields[definition.name].split("|") : [], additionalProperties: false }, names = keys(definition.args), i, name, schema;
         var numeric = "|width|height|pixelAspect|duration|frameRate|sampleRate|resumeCompId|workAreaStart|workAreaDuration|displayStartTime|fontSize|startTime|inPoint|outPoint|label|time|roundness|strokeWidth|maxItems|maxLayers|maxProperties|";
@@ -349,8 +350,8 @@
             if (name === "path" && (definition.name === "media.import" || definition.name === "project.save")) { schema = { type: "string", minLength: 1, maxLength: 4096 }; }
             if (name === "outputPath") { schema = { type: "string", minLength: 1, maxLength: 4096 }; }
             if (name === "zoom" || name === "intensity" || name === "points" || name === "outerRadius" || name === "innerRadius" || name === "shapeRotation") { schema = { type: "number" }; }
-            if (name === "numFrames") { schema = { type: "integer", minimum: 1, maximum: 10 }; }
-            if (name === "times") { schema = { type: "array", minItems: 1, maxItems: 10, items: { type: "number", minimum: 0 } }; }
+            if (name === "numFrames") { schema = { type: "integer", minimum: 1, maximum: 3 }; }
+            if (name === "times") { schema = { type: "array", minItems: 1, maxItems: 3, items: { type: "number", minimum: 0 } }; }
             if (name === "type" && definition.name === "project.search") { schema = { type: "string", "enum": ["all", "composition", "footage", "solid", "folder"] }; }
             if (name === "type" && definition.name === "layer.camera.create") { schema = { type: "string", "enum": ["one-node", "two-node"] }; }
             if (name === "type" && definition.name === "layer.light.create") { schema = { type: "string", "enum": ["point", "spot", "parallel", "ambient"] }; }
@@ -367,6 +368,49 @@
     register("system.info", "Read host version and connection context", false, {}, function () {}, function () {
         return { runtimeVersion: VERSION, host: "After Effects", version: String(app.version || ""), projectOpen: !!app.project, activeComp: app.project && isComp(app.project.activeItem) ? compSummary(app.project.activeItem) : null };
     });
+    function memoryBytes() {
+        if (typeof app === "undefined" || !app) { fail("After Effects memory information is unavailable"); }
+        var value = app.memoryInUse;
+        if (!finite(value) || value < 0) { fail("After Effects memoryInUse must report a nonnegative byte count"); }
+        return value;
+    }
+    function memoryNativeMethod(type) { return type === "function" || type === "unknown"; }
+    function memoryPreflight(a) {
+        var operation = has(a, "operation") ? a.operation : "inspect", bytes = memoryBytes(), p, queue;
+        if (operation !== "inspect") {
+            p = app.project;
+            if (p) {
+                queue = p.renderQueue;
+                if (!queue || typeof queue.rendering !== "boolean") { fail("Cannot verify the After Effects render queue is idle"); }
+                if (queue.rendering) { fail("Memory configuration and cache release are unavailable while After Effects is rendering"); }
+            }
+            if (operation === "configure" && !memoryNativeMethod(typeof app.setMemoryUsageLimits)) { fail("After Effects setMemoryUsageLimits is unavailable"); }
+            if (operation === "purgeImages" && (!memoryNativeMethod(typeof app.purge) || typeof PurgeTarget === "undefined" || typeof PurgeTarget.IMAGE_CACHES === "undefined" || PurgeTarget.IMAGE_CACHES === null)) { fail("After Effects IMAGE_CACHES purge is unavailable"); }
+        }
+        return bytes;
+    }
+    var memoryOperationSchema = { type: "string", "enum": ["inspect", "configure", "purgeImages"], "default": "inspect", description: "Inspect memory by default; configure application percentages or release only cached image data when explicitly requested" };
+    var memoryPercentageSchema = { type: "number", minimum: 0, maximum: 100, description: "Native AE percentage; required only for configure, with no supported readback or hard byte-limit guarantee" };
+    register("app.memory", "Inspect native AE memory use, configure its memory percentages, or release image cache without clearing Undo or disk cache; never changes project data", true, { operation: "optional inspect (default), configure or purgeImages", imageCachePercentage: "configure only: required finite percentage 0..100 for the image cache", maximumMemoryPercentage: "configure only: required finite percentage 0..100 for maximum usable memory; not a hard process byte cap" }, function (a) {
+        var operation = has(a, "operation") ? a.operation : "inspect";
+        if (operation !== "inspect" && operation !== "configure" && operation !== "purgeImages") { fail("args.operation must be inspect, configure or purgeImages"); }
+        if (operation === "configure") {
+            number(a.imageCachePercentage, "args.imageCachePercentage", 0, 100);
+            number(a.maximumMemoryPercentage, "args.maximumMemoryPercentage", 0, 100);
+        } else if (has(a, "imageCachePercentage") || has(a, "maximumMemoryPercentage")) { fail("Memory percentages are accepted only for args.operation configure"); }
+    }, function (a) {
+        var operation = has(a, "operation") ? a.operation : "inspect", before = memoryPreflight(a), result;
+        if (operation === "configure") { app.setMemoryUsageLimits(a.imageCachePercentage, a.maximumMemoryPercentage); }
+        else if (operation === "purgeImages") { app.purge(PurgeTarget.IMAGE_CACHES); }
+        result = { operation: operation, beforeBytes: before, afterBytes: memoryBytes(), limitsReadbackAvailable: false, projectModified: false, preservesUndo: true, preservesDiskCache: true };
+        if (operation === "configure") { result.requestedLimits = { imageCachePercentage: a.imageCachePercentage, maximumMemoryPercentage: a.maximumMemoryPercentage }; }
+        if (operation === "purgeImages") { result.purgedTarget = "IMAGE_CACHES"; result.releasedBytes = Math.max(0, before - result.afterBytes); }
+        return result;
+    }, "", { undo: false, exclusive: true, nativeInputSchema: { type: "object", properties: { operation: memoryOperationSchema, imageCachePercentage: memoryPercentageSchema, maximumMemoryPercentage: memoryPercentageSchema }, required: [], additionalProperties: false, oneOf: [
+        { type: "object", properties: { operation: { type: "string", "enum": ["inspect"] } }, additionalProperties: false },
+        { type: "object", properties: { operation: { type: "string", "enum": ["configure"] }, imageCachePercentage: memoryPercentageSchema, maximumMemoryPercentage: memoryPercentageSchema }, required: ["operation", "imageCachePercentage", "maximumMemoryPercentage"], additionalProperties: false },
+        { type: "object", properties: { operation: { type: "string", "enum": ["purgeImages"] } }, required: ["operation"], additionalProperties: false }
+    ] } });
     register("tools.list", "List reusable installed tools; archived scripts require explicit includeLegacy:true", false, { includeLegacy: "optional boolean; default false, archive maintenance only" }, function (a) { optional(a, "includeLegacy", boolValue); }, function (a) { return list(a.includeLegacy); });
     register("project.inspect", "Read project items without changing the project", false, { maxItems: "optional integer 1..5000; default 100" }, function (a) { optional(a, "maxItems", function (v, p) { whole(v, p, 1, 5000); }); }, function (a) {
         var p = project(), out = [], limit = a.maxItems || 100, i, item, projectFile = p.file, summary, fields = ["width", "height", "duration", "frameRate", "numLayers", "numItems"], j, value, file, color;
@@ -706,7 +750,7 @@
         c.time=a.time;c.openInViewer();return compSummary(c);
     });
     function validate(request) {
-        var refs = {}, i, step, definition, allowed;
+        var refs = {}, i, step, definition, allowed, captureCalls = 0;
         exact(request, "schema|steps", "request");
         if (request.schema !== SCHEMA) { fail("request.schema must be " + SCHEMA); }
         if (!array(request.steps) || !request.steps.length || request.steps.length > 100) { fail("request.steps must contain 1 to 100 calls"); }
@@ -719,6 +763,10 @@
             definition = definitions[step["function"]]; allowed = keys(definition.args).join("|");
             if (definition.options.exclusive && request.steps.length !== 1) { fail(definition.name + " must be called alone, outside an edit plan"); }
             exact(step.args, allowed, "steps[" + i + "].args"); definition.check(step.args, refs);
+            if (definition.name === "inspection.capture") {
+                captureCalls += 1;
+                if (captureCalls > 1) { fail("Only one inspection.capture call is allowed per request; capture at most 3 frames in that call"); }
+            }
             if (has(step, "as")) {
                 if (!definition.resultKind) { fail("This function does not create a reference: " + definition.name); }
                 text(step.as, "steps[" + i + "].as", 64);
@@ -732,6 +780,7 @@
         var out = [], i, step, a, entry, definition, dynamicComp, dynamicLayer, property, j, priorMutation = false;
         for (i = 0; i < request.steps.length; i += 1) {
             step = request.steps[i]; a = step.args; definition = definitions[step["function"]]; entry = { step: step, definition: definition };
+            if (definition.name === "app.memory") { memoryPreflight(a); }
             dynamicComp = a.comp && has(a.comp, "ref"); dynamicLayer = a.layer && has(a.layer, "ref");
             if (definition.name === "project.inspect" || definition.name === "comp.create") { project(); }
             if (has(definition.args, "comp") && !dynamicComp) {
