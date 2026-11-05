@@ -1,13 +1,13 @@
 # Codex + Adobe After Effects (Windows)
 
-Bản phát hành mới nhất: **Bridge 2.1.0**, 44 công cụ AE dùng lại. Tải bộ cài ZIP tại
+Bản phát hành mới nhất: **Bridge 2.1.1**, 44 công cụ AE dùng lại. Tải bộ cài ZIP tại
 [GitHub Releases](https://github.com/nammtnzz/AE_Codex/releases/latest), giải nén
 toàn bộ rồi chạy **Codex AE.exe**. Thư mục cài mặc định là `%LOCALAPPDATA%\AE_Codex`;
 source trong repo được giữ riêng với runtime đã cài.
 
-**Tải bộ cài mới:** [CodexAE-2.1.0.zip](https://github.com/nammtnzz/AE_Codex/releases/download/release-2.1.0-9ac44808971c/CodexAE-2.1.0.zip). Giải nén toàn bộ rồi chạy Codex AE.exe.
+**Tải bộ cài mới:** [CodexAE-2.1.1.zip](https://github.com/nammtnzz/AE_Codex/releases/download/release-2.1.1-1aa115fd9432/CodexAE-2.1.1.zip). Giải nén toàn bộ rồi chạy Codex AE.exe.
 
-Lưu ý: source trên nhánh main chưa đồng bộ đầy đủ với gói phát hành 2.1.0. Để cài bản mới, tải ZIP trong Releases; các mục Source code và Code → Download ZIP là source của nhánh/tag. Phần tài liệu bên dưới có thể còn mô tả phiên bản cũ.
+Lưu ý: source trên nhánh main chưa đồng bộ đầy đủ với gói phát hành 2.1.1. Để cài bản mới, tải ZIP trong Releases; các mục Source code và Code → Download ZIP là source của nhánh/tag. Phần tài liệu bên dưới có thể còn mô tả phiên bản cũ.
 
 Mở **Codex AE.exe** ngay trong thư mục `AE_Codex` để vào phần cài đặt/cập nhật.
 Source và dữ liệu vẫn giữ nguyên đường dẫn; chế độ thư mục gọn chỉ ẩn các mục kỹ thuật
