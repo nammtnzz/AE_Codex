@@ -107,7 +107,7 @@ Cài thành công: hiện thông báo tiếng Việt rồi tự đóng sau 3 gi�
 Để gỡ một bản đã cài: chọn đúng nơi cài đặt và bấm Gỡ cài đặt.
 Bấm Stop trong panel AE và chờ công việc hoàn tất trước khi gỡ.
 
-Để chia sẻ sang máy khác, gửi file CodexAE-*.zip mới nhất trong .ae-codex/releases.
+Để chia sẻ sang máy khác, gửi file CodexAE-<phiên bản>.zip nằm ngay trong thư mục này (chỉ giữ bản mới nhất).
 Các thư mục kỹ thuật được giữ nguyên tại chỗ; giao diện gọn chỉ ẩn chúng.
 Khôi phục hiển thị: pwsh -NoProfile -File tools/Publish-AeDesktopEntry.ps1 -RestoreLayout
 '@

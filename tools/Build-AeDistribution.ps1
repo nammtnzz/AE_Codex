@@ -37,6 +37,20 @@ $release | Add-Member -NotePropertyName zipBytes -NotePropertyValue (Get-Item -L
 $release | Add-Member -NotePropertyName zipSha256 -NotePropertyValue (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $release | Add-Member -NotePropertyName launcherPath -NotePropertyValue $launcher
 $release | Add-Member -NotePropertyName signed -NotePropertyValue $false
+# Only the newest installer is visible next to the project: publish it as CodexAE-<version>.zip and
+# remove older ZIPs there and older builds in .ae-codex/releases.
+$published = Join-Path $workspace ('CodexAE-' + $release.version + '.zip')
+Copy-Item -LiteralPath $zip -Destination $published -Force
+$cleanupWarnings = [Collections.Generic.List[string]]::new()
+$releasesRoot = Join-Path $workspace '.ae-codex/releases'
+$oldBuilds = @(Get-ChildItem -LiteralPath $workspace -Filter 'CodexAE-*.zip' -File | Where-Object { $_.FullName -ine $published }) +
+    @(Get-ChildItem -LiteralPath $releasesRoot -Force | Where-Object { ($_.Name -like 'CodexAE-*' -or $_.Name -like '.stage-*') -and ($_.Name -replace '\.zip$', '') -ne [IO.Path]::GetFileName($release.packagePath) })
+foreach ($old in $oldBuilds) {
+    # A folder held open (Explorer, a shell) is retried by the daily retention task.
+    try { Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction Stop } catch { $cleanupWarnings.Add($old.Name + ': ' + $_.Exception.Message) }
+}
+$release | Add-Member -NotePropertyName cleanupWarnings -NotePropertyValue @($cleanupWarnings)
+$release | Add-Member -NotePropertyName publishedZip -NotePropertyValue $published
 $report = Join-Path $workspace '.ae-codex/releases/latest.json'
 [IO.File]::WriteAllText($report, ($release | ConvertTo-Json -Depth 16), [Text.UTF8Encoding]::new($false))
 $release | ConvertTo-Json -Depth 16

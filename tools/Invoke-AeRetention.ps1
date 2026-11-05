@@ -4,7 +4,10 @@
 #   - generated output under each workspace's .ae-codex: inspection runs, renders, setup backups,
 #     finished bridge results, rotated logs and superseded release builds (newest always kept)
 #   - built release ZIPs at a workspace root, always keeping the newest one
-# Catalogs, library, bundle, functions, plugins, python dependencies and active locks are never touched.
+#   - any other top-level .ae-codex entry (job scratch: images, JSON, NPY, scripts, analysis folders,
+#     old runtimes and fixtures) that is not in the runtime keep-list below
+# The runtime keep-list (bridge, bundle, functions, library, plugins, knowledge, setup, ...) and active
+# locks are never removed as a whole; only their generated subfolders above age out.
 # -Register installs a daily current-user scheduled task; -Unregister removes it.
 [CmdletBinding()]
 param(
@@ -63,16 +66,25 @@ function Remove-Old([System.IO.FileSystemInfo]$Item, [string]$Within) {
     # A folder is old only when nothing inside it changed recently.
     $newest = $Item.LastWriteTimeUtc
     $bytes = [long]0
+    $links = [Collections.Generic.List[IO.FileSystemInfo]]::new()
     if ($Item -is [IO.DirectoryInfo]) {
+        # Recursion does not follow links; their targets (possibly other projects) are never counted or touched.
         foreach ($entry in Get-ChildItem -LiteralPath $Item.FullName -Recurse -Force -ErrorAction SilentlyContinue) {
-            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { $links.Add($entry); continue }
+            if ($links | Where-Object { Test-IsChild $entry.FullName $_.FullName }) { continue }
             if ($entry.LastWriteTimeUtc -gt $newest) { $newest = $entry.LastWriteTimeUtc }
             if ($entry -is [IO.FileInfo]) { $bytes += $entry.Length }
         }
     } else { $bytes = $Item.Length }
     if ($newest -ge $cutoff) { return }
     try {
-        if (-not $WhatIf) { Remove-Item -LiteralPath $Item.FullName -Recurse -Force }
+        if (-not $WhatIf) {
+            # Unlink junctions/symlinks first (removes only the link), then delete the real files.
+            foreach ($link in ($links | Sort-Object { $_.FullName.Length } -Descending)) {
+                if ($link -is [IO.DirectoryInfo]) { [IO.Directory]::Delete($link.FullName, $false) } else { [IO.File]::Delete($link.FullName) }
+            }
+            Remove-Item -LiteralPath $Item.FullName -Recurse -Force
+        }
         $script:freedBytes += $bytes
         $removed.Add([IO.Path]::GetRelativePath($Within, $Item.FullName))
     } catch { $warnings.Add("$($Item.FullName): $($_.Exception.Message)") }
@@ -98,7 +110,13 @@ foreach ($root in ($roots | Select-Object -Unique)) {
     $data = Join-Path $root '.ae-codex'
     if (-not (Test-Path -LiteralPath $data -PathType Container) -or (Test-Linked $data)) { continue }
     if (Test-Path -LiteralPath (Join-Path $data 'bridge/submit.lock')) { $warnings.Add("$root busy; skipped this run."); continue }
-    foreach ($relative in @('inspection', 'renders', 'setup/backups')) {
+    # Everything the runtime reads or writes; all other top-level entries are leftovers of past jobs.
+    $keep = @('.gitkeep', 'active.lock', 'bridge', 'bundle', 'chat', 'functions', 'inspection', 'knowledge', 'library', 'plugins', 'releases', 'setup', 'share', 'tests')
+    foreach ($item in Get-ChildItem -LiteralPath $data -Force) {
+        if ($keep -contains $item.Name) { continue }
+        Remove-Old $item $data
+    }
+    foreach ($relative in @('inspection', 'renders', 'setup/backups', 'bundle/backups', 'tests')) {
         $folder = Join-Path $data $relative
         if (Test-Path -LiteralPath $folder -PathType Container) {
             foreach ($item in Get-ChildItem -LiteralPath $folder -Force) { Remove-Old $item $data }
@@ -120,8 +138,11 @@ foreach ($root in ($roots | Select-Object -Unique)) {
     if (Test-Path -LiteralPath $releases -PathType Container) {
         # Keep the newest build (folder + ZIP) that latest.json and the share guide point to.
         $builds = @(Get-ChildItem -LiteralPath $releases -Force | Where-Object Name -like 'CodexAE-*' | Sort-Object LastWriteTimeUtc -Descending)
-        $newest = if ($builds.Count) { [IO.Path]::GetFileNameWithoutExtension($builds[0].Name) -replace '\.zip$', '' } else { '' }
+        # Version dots make GetFileNameWithoutExtension unsafe here; strip only ".zip".
+        $newest = if ($builds.Count) { $builds[0].Name -replace '\.zip$', '' } else { '' }
         foreach ($item in $builds) { if (($item.Name -replace '\.zip$', '') -ne $newest) { Remove-Old $item $data } }
+        # Old publish logs/scripts/checks; latest.json points at the newest build and stays.
+        foreach ($item in Get-ChildItem -LiteralPath $releases -Force | Where-Object { $_.Name -notlike 'CodexAE-*' -and $_.Name -ne 'latest.json' }) { Remove-Old $item $data }
     }
     $zips = @(Get-ChildItem -LiteralPath $root -Filter 'CodexAE-*.zip' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
     foreach ($zip in ($zips | Select-Object -Skip 1)) { Remove-Old $zip $root }

@@ -119,7 +119,8 @@ function Start-BackgroundLibraryService {
     param([string]$Launcher, [string]$LauncherSha256)
     $servicePath = Join-Path $libraryRoot 'background-service.json'
     Assert-OrdinaryPath $servicePath
-    $process = Start-Process -FilePath $Launcher -ArgumentList '--serve' -WindowStyle Hidden -PassThru
+    # Own folder as working directory: inheriting the caller's (e.g. an extracted installer) would lock it.
+    $process = Start-Process -FilePath $Launcher -ArgumentList '--serve' -WorkingDirectory ([IO.Path]::GetDirectoryName($Launcher)) -WindowStyle Hidden -PassThru
     try {
         $deadline = [datetime]::UtcNow.AddSeconds(10)
         while ([datetime]::UtcNow -lt $deadline) {
