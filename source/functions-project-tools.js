@@ -1,4 +1,56 @@
     /* Project/media/render tools. Injected into the reusable registry; ES3 only. */
+    register("comp.unpack", "Unpack a topmost identity precomp into its parent, preserving native layers, keys and parents", true,
+        { comp: "parent composition selector", layer: "topmost identity precomp layer", removeUnusedSource: "optional boolean; delete the source only when exclusively used by this container" },
+        function (a, refs) { selectors(a, refs, true); optional(a, "removeUnusedSource", boolValue); },
+        function (a, refs, entry) {
+            var selected = resolved(a, refs, entry, true), dest = selected.comp, container = selected.layer, source = container.source;
+            var originals = [], copies = [], parents = [], mattes = [], locks = [], i, j, p, v, expected, fx, masks, anchor = container, count = dest.numLayers, committed = false;
+            if (!isComp(source) || source === dest) { fail("Select a precomposition layer"); }
+            if (container.index !== 1 || container.locked || container.parent || container.threeDLayer || container.timeRemapEnabled || container.collapseTransformation || !container.enabled || container.solo || container.guideLayer) { fail("Unpack requires a topmost, unlocked, enabled, unparented 2D identity precomp"); }
+            if (container.stretch !== 100 || Math.abs(container.startTime) > 0.000001 || container.inPoint > 0 || container.outPoint < dest.duration || source.duration < dest.duration) { fail("Unpack requires untrimmed, unshifted, normal-speed coverage"); }
+            if (source.width !== dest.width || source.height !== dest.height || source.pixelAspect !== dest.pixelAspect || source.frameRate !== dest.frameRate || source.numLayers < 1 || source.numLayers > 1000) { fail("Unpack requires matching comp geometry/rate and 1..1000 layers"); }
+            if (container.hasAudio && !container.audioEnabled) { fail("Unpack does not support a muted container"); }
+            fx = container.property("ADBE Effect Parade"); masks = container.property("ADBE Mask Parade");
+            if ((fx && fx.numProperties) || (masks && masks.numProperties)) { fail("Unpack does not support container effects or masks"); }
+            expected = [["ADBE Position", [dest.width / 2, dest.height / 2]], ["ADBE Anchor Point", [source.width / 2, source.height / 2]], ["ADBE Scale", [100,100]], ["ADBE Rotate Z", 0], ["ADBE Opacity", 100]];
+            for (i = 0; i < expected.length; i += 1) {
+                p = container.property("ADBE Transform Group").property(expected[i][0]);
+                if (!p || p.numKeys || p.expressionEnabled) { fail("Unpack requires static identity transforms"); }
+                v = p.value;
+                if (array(expected[i][1])) { for (j = 0; j < 2; j += 1) { if (Math.abs(v[j] - expected[i][1][j]) > 0.000001) { fail("Unpack requires identity transforms"); } } }
+                else if (Math.abs(v - expected[i][1]) > 0.000001) { fail("Unpack requires identity transforms"); }
+            }
+            if (typeof BlendingMode !== "undefined" && container.blendingMode !== BlendingMode.NORMAL) { fail("Unpack requires Normal blending"); }
+            if (a.removeUnusedSource) {
+                if (!source.usedIn || source.usedIn.length !== 1 || source.usedIn[0] !== dest) { fail("Source is shared; it cannot be deleted"); }
+                for (i = 1; i <= dest.numLayers; i += 1) { if (dest.layer(i) !== container && dest.layer(i).source === source) { fail("Source has another instance"); } }
+                if (project().renderQueue) { for (i = 1; i <= project().renderQueue.numItems; i += 1) { if (project().renderQueue.item(i).comp === source) { fail("Source is used by the render queue"); } } }
+            }
+            for (i = 1; i <= source.numLayers; i += 1) {
+                p = source.layer(i); originals[i] = p; parents[i] = p.parent ? p.parent.index : 0; locks[i] = p.locked;
+                mattes[i] = p.trackMatteLayer ? p.trackMatteLayer.index : 0;
+                if (mattes[i] && typeof p.setTrackMatte !== "function") { fail("Explicit track matte relinking is unavailable"); }
+                if (typeof p.copyToComp !== "function") { fail("Native layer copying is unavailable"); }
+            }
+            try {
+                for (i = originals.length - 1; i >= 1; i -= 1) {
+                    originals[i].copyToComp(dest); p = dest.layer(1); copies[i] = p; p.locked = false;
+                    p.moveBefore(anchor); anchor = p;
+                }
+                for (i = 1; i < originals.length; i += 1) {
+                    p = copies[i]; p.setParentWithJump(parents[i] ? copies[parents[i]] : null);
+                    if (mattes[i]) { p.setTrackMatte(copies[mattes[i]], originals[i].trackMatteType); }
+                }
+                if (dest.numLayers !== count + source.numLayers) { fail("Copied layer count does not match"); }
+                for (i = 1; i < originals.length; i += 1) { copies[i].locked = locks[i]; }
+                container.remove(); committed = true;
+            } finally {
+                if (!committed) { for (i = 1; i < copies.length; i += 1) { if (copies[i]) { copies[i].locked = false; copies[i].remove(); } } }
+            }
+            count = originals.length - 1;
+            if (a.removeUnusedSource) { if (source.usedIn.length) { fail("Layers unpacked, but source unexpectedly remains referenced; source retained"); } source.remove(); }
+            return { compId: dest.id, unpackedLayers: count, numLayers: dest.numLayers, removedSource: !!a.removeUnusedSource };
+        }, "", { nativeInputSchema: { type: "object", properties: { comp: selectorSchema("comp"), layer: selectorSchema("layer"), removeUnusedSource: { type: "boolean" } }, required: ["layer"], additionalProperties: false } });
     var projectToolsRenderApprovals = [];
     function projectToolsType(item) {
         if (isComp(item)) { return "composition"; }

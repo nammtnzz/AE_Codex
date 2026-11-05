@@ -5,7 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $testId = [guid]::NewGuid().ToString('N')
-$fixture = Join-Path ([IO.Path]::GetTempPath()) "CodexAE-lifecycle-$testId/Máy mới & 100% O'Brien"
+$fixture = Join-Path ([IO.Path]::GetTempPath()) "CodexAE-lifecycle-$testId/New machine & 100% O'Brien"
 $tools = Join-Path $fixture 'tools'
 $registryRoot = "HKCU:\Software\CodexAE\Tests\$testId"
 $registryPath = Join-Path $registryRoot 'Run'

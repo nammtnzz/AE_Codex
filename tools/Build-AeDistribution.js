@@ -13,13 +13,13 @@ const runtimeFiles = [
     "source/functions-layer-tools.js", "source/functions-project-tools.js", "source/functions-inspection-tools.js",
     "tools/AeScriptSource.js", "tools/AeScriptCapabilities.js", "tools/AeFunctionsSource.js",
     "tools/Build-AeScriptBundle.js", "tools/AeCapabilities.js", "tools/Get-AeCapabilities.js",
-    "tools/AeFunctionsMcp.js", "tools/AeFunctionRequest.ps1", "tools/Invoke-AeFunction.ps1",
+    "tools/AeFunctionsMcp.js", "tools/AeFunctionsMcpLauncher.js", "tools/AeKnowledge.js", "tools/AeFunctionRequest.ps1", "tools/Invoke-AeFunction.ps1",
     "tools/Get-AeFunctions.ps1", "tools/Submit-AeJsx.ps1", "tools/Resolve-AeScriptTarget.ps1",
     "tools/Reset-AeBridgeLock.ps1", "tools/Get-AeInspectionReport.ps1", "tools/Sync-CodexModelDisplay.ps1",
     "tools/Install-AeFunctionsMcp.ps1", "tools/AeCodexConfig.js", "tools/Validate-AeBridgeInstallation.ps1",
     "tools/Initialize-AeLibrary.ps1", "tools/AeBackgroundLauncher.cs", "tools/AeBackgroundServiceLifecycle.ps1", "tools/Start-AeSfxCatalog.ps1", "tools/Update-AeSfxCatalog.ps1",
     "tools/AeBridgePanel.js", "tools/AeBridgeStartup.js",
-    "tools/Install-AeDistribution.ps1", "tools/Uninstall-AeDistribution.ps1", "tools/Manage-AeInstallation.ps1", "tools/Remove-AeOldVersions.ps1"
+    "tools/Install-AeDistribution.ps1", "tools/Uninstall-AeDistribution.ps1", "tools/Manage-AeInstallation.ps1", "tools/Remove-AeOldVersions.ps1", "tools/Invoke-AeRetention.ps1"
 ];
 function walk(root, prefix = "") {
     const result = [];
@@ -90,6 +90,10 @@ function buildDistribution(workspace = path.resolve(__dirname, "..")) {
         write(payload, "AGENTS.md", fs.readFileSync(path.join(workspace, "docs/distribution/AGENTS.md")));
         write(payload, ".ae-codex/library/USAGE.md", fs.readFileSync(path.join(workspace, "docs/distribution/LIBRARY-USAGE.md")));
         write(payload, ".ae-codex/plugins/USAGE.md", fs.readFileSync(path.join(workspace, "docs/distribution/PLUGINS-USAGE.md")));
+        // Learned lessons exported (sanitized) by Build-AeDistribution.ps1 travel with the release;
+        // the installer merges them into the receiving machine's own knowledge store.
+        const sharedLessons = path.join(workspace, ".ae-codex/share/shared-lessons.json");
+        if (fs.existsSync(sharedLessons) && fs.lstatSync(sharedLessons).isFile()) write(payload, "knowledge/shared-lessons.json", fs.readFileSync(sharedLessons));
         const bundle = build(payload);
         verify(fs.readFileSync(bundle.file, "utf8"), releaseSource);
         const api = createCapabilitiesApi(payload);

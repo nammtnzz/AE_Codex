@@ -5,13 +5,19 @@ param(
     [switch]$SkipRegistration,
     # Explicitly permit a fixture/custom config path for desktop registration.
     [switch]$RegisterDesktop,
-    [string]$ConfigPath
+    [string]$ConfigPath,
+    # Version-independent launcher outside versions/<id>; upgrades then need no config edit.
+    [string]$StableServerPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $serverPath = Join-Path $PSScriptRoot 'AeFunctionsMcp.js'
+if ($StableServerPath) {
+    $serverPath = [IO.Path]::GetFullPath($StableServerPath)
+    $workspaceRoot = [IO.Path]::GetDirectoryName($serverPath)
+}
 if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "AE MCP server is missing: $serverPath" }
 if ($SkipRegistration -and $RegisterDesktop) { throw '-SkipRegistration and -RegisterDesktop cannot be combined.' }
 if ($ConfigPath -and -not ($SkipRegistration -or $RegisterDesktop)) { throw '-ConfigPath requires -SkipRegistration or -RegisterDesktop; normal registration uses the active Codex user configuration.' }

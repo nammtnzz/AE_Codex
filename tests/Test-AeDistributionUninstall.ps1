@@ -3,13 +3,15 @@
 param([string]$PayloadRoot)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Unicode user/install paths (e.g. 'New machine') must survive child PowerShell output on non-UTF-8 consoles.
+$OutputEncoding = [Text.UTF8Encoding]::new($false); try { [Console]::OutputEncoding = $OutputEncoding } catch { }
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if (-not $PayloadRoot) {
     $release = [IO.File]::ReadAllText((Join-Path $workspace '.ae-codex/releases/latest.json')) | ConvertFrom-Json
     $PayloadRoot = Join-Path $workspace ('.ae-codex/releases/CodexAE-' + $release.packageId + '/payload')
 }
 $testId = [guid]::NewGuid().ToString('N')
-$fixture = Join-Path ([IO.Path]::GetTempPath()) ("Codex AE uninstall $testId/Máy mới & 100% O'Brien")
+$fixture = Join-Path ([IO.Path]::GetTempPath()) ("Codex AE uninstall $testId/New machine & 100% O'Brien")
 $data = Join-Path $fixture '.ae-codex'
 $payload = Join-Path $data 'payload'
 $installRoot = Join-Path $fixture 'CodexAE'

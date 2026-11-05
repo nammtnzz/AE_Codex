@@ -30,6 +30,7 @@ function fixture() {
         require(name) {
             if (name === "node:fs") { return fakeFs; }
             if (name === "./AeCapabilities.js") { return {}; }
+            if (name === "./AeKnowledge.js") { return { toolDefinitions: [] }; }
             if (name === "node:child_process") { return { spawn() { throw new Error("AE dispatch is forbidden in this fixture"); } }; }
             return require(name);
         } };

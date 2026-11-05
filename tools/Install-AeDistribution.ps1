@@ -14,6 +14,8 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Unicode user/install paths (e.g. 'Máy mới') must survive child PowerShell output on non-UTF-8 consoles.
+$OutputEncoding = [Text.UTF8Encoding]::new($false); try { [Console]::OutputEncoding = $OutputEncoding } catch { }
 $utf8 = [Text.UTF8Encoding]::new($false)
 $payloadRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $installLock = $null
@@ -67,7 +69,7 @@ function Confirm-Payload([object]$Manifest, [string]$Root) {
             throw "Package verification failed: $($file.path). Extract a fresh copy of the package."
         }
     }
-    foreach ($required in @('jsx/Codex Bridge.jsx','tools/AeBridgePanel.js','tools/AeBridgeStartup.js','tools/Validate-AeBridgeInstallation.ps1','tools/Build-AeScriptBundle.js','tools/AeFunctionsMcp.js','tools/Install-AeFunctionsMcp.ps1','tools/AeCodexConfig.js','tools/Initialize-AeLibrary.ps1','tools/AeBackgroundLauncher.cs','tools/AeBackgroundServiceLifecycle.ps1','.ae-codex/functions/catalog.json','.ae-codex/functions/capabilities.json','source/scripts.json','source/script-inventory.json')) {
+    foreach ($required in @('jsx/Codex Bridge.jsx','tools/AeBridgePanel.js','tools/AeBridgeStartup.js','tools/Validate-AeBridgeInstallation.ps1','tools/Build-AeScriptBundle.js','tools/AeFunctionsMcp.js','tools/AeFunctionsMcpLauncher.js','tools/AeKnowledge.js','tools/Install-AeFunctionsMcp.ps1','tools/AeCodexConfig.js','tools/Initialize-AeLibrary.ps1','tools/AeBackgroundLauncher.cs','tools/AeBackgroundServiceLifecycle.ps1','.ae-codex/functions/catalog.json','.ae-codex/functions/capabilities.json','source/scripts.json','source/script-inventory.json')) {
         if (-not $seen.ContainsKey($required)) { throw "Package manifest is incomplete: $required" }
     }
 }
@@ -246,8 +248,18 @@ try {
     if ($SfxChoice -ne 'Preserve' -or -not [IO.File]::Exists($onboardingPath)) {
         Write-AtomicText $onboardingPath (([ordered]@{schemaVersion=1;soundIndexing=$(if($initializedLibrary.sfxEnabled){'enabled'}else{'declined'});choiceAt=[DateTime]::UtcNow.ToString('o')}) | ConvertTo-Json)
     }
+    # Lessons learned on the machine that built this release are merged (never overwritten)
+    # into this machine's own store outside versions/, so learning continues here.
+    $sharedLessons = Join-Path $runtimeRoot 'knowledge/shared-lessons.json'
+    if ([IO.File]::Exists($sharedLessons)) {
+        try {
+            $merged = (& $nodeCommand.Source (Join-Path $runtimeRoot 'tools/AeKnowledge.js') --merge $sharedLessons (Join-Path $InstallRoot 'knowledge')) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'merge failed' }
+            Write-SetupProgress ('Learned AE knowledge merged: {0} new, {1} updated; this machine keeps learning on top.' -f $merged.added, $merged.updated)
+        } catch { Write-SetupProgress ('NOTICE: shared AE knowledge was not merged: ' + $_.Exception.Message) }
+    }
     Write-SetupProgress 'Checking the installed bundle once; no AE project scripts are executed.'
-    $validation = & (Join-Path $runtimeRoot 'tools/Validate-AeBridgeInstallation.ps1') -WorkspaceRoot $runtimeRoot | ConvertFrom-Json
+    $validation =& (Join-Path $runtimeRoot 'tools/Validate-AeBridgeInstallation.ps1') -WorkspaceRoot $runtimeRoot | ConvertFrom-Json
     if ($validation.state -cne 'success') { throw 'Installed bundle validation failed.' }
     $bundlePath = Join-Path $runtimeRoot 'jsx/Codex Bridge.jsx'
     $panelText = Get-LoaderText (Join-Path $runtimeRoot 'tools/AeBridgePanel.js') $bundlePath
@@ -267,7 +279,12 @@ try {
     else {
         try {
             Write-SetupProgress 'Linking tools to this Windows user''s Codex configuration. Codex CLI is not required.'
-            $registration = & (Join-Path $runtimeRoot 'tools/Install-AeFunctionsMcp.ps1') | ConvertFrom-Json
+            # Codex points at this fixed launcher; it follows installation.json, so
+            # later upgrades and old-version cleanup cannot break the connection.
+            $stableServerPath = Join-Path $InstallRoot 'AeFunctionsMcp.js'
+            Assert-PlainPath $stableServerPath
+            Write-AtomicText $stableServerPath ([IO.File]::ReadAllText((Join-Path $runtimeRoot 'tools/AeFunctionsMcpLauncher.js')))
+            $registration = & (Join-Path $runtimeRoot 'tools/Install-AeFunctionsMcp.ps1') -StableServerPath $stableServerPath | ConvertFrom-Json
             if ($registration.state -cne 'success' -or -not $registration.registered) { throw 'Codex configuration was not registered.' }
             $mcpState = 'configured'
             $mcpConfigPath = $registration.configPath
@@ -331,6 +348,13 @@ try {
             foreach ($item in @($versionCleanup.deferred)) { $warnings.Add('Old version ' + $item.version + ' kept for now: ' + $item.reason) }
         }
     } catch { $warnings.Add('Old version cleanup skipped: ' + $_.Exception.Message) }
+    # Daily retention: generated data and superseded versions older than 10 days are removed so disk use stays bounded.
+    if (-not $SkipBackgroundService -and $AppDataRoot.TrimEnd('\','/') -ieq $realAppDataRoot) {
+        try {
+            & (Join-Path $runtimeRoot 'tools/Invoke-AeRetention.ps1') -Register -InstallRoot $InstallRoot -Days 10 | Out-Null
+            Write-SetupProgress 'Daily cleanup scheduled: data older than 10 days is removed automatically.'
+        } catch { $warnings.Add('Automatic 10-day cleanup was not scheduled: ' + $_.Exception.Message) }
+    }
     foreach ($warning in $warnings) { Write-SetupProgress ('NOTICE: ' + $warning) }
     $result = [ordered]@{schema='codex-ae-install-result/v1';state='success';versionCleanup=$versionCleanup;runtimeRoot=$runtimeRoot;installationPath=$metadataPath;version=$manifest.version;versionFolder=$VersionFolder;toolCount=$manifest.toolCount;mcpState=$mcpState;mcpConfigPath=$mcpConfigPath;mcpRegistrationMethod=$mcpRegistrationMethod;codexReloadRequired=($mcpState -eq 'configured');codexSessionVerified=$false;effectsState='pending-manual-scan';backgroundServiceState=$backgroundState;backgroundAutostartRegistered=$backgroundAutostartRegistered;soundIndexing=[bool]$initializedLibrary.sfxEnabled;warnings=@($warnings);logPath=$LogPath;nextStep='Reload MCP or restart Codex once to load ae_functions on this computer. Open Window > Codex Bridge in AE and click the Effects or SFX scan button when you want a fresh catalog. If requested by AE, enable Allow Scripts to Write Files and Access Network.'}
     Write-SetupProgress 'Installation completed.'

@@ -305,7 +305,13 @@ function removeMcpConfig(original, settings) {
     const nodePath = canonicalPath(settings.nodePath);
     if (!runtimeRoot || !nodePath) fail("absolute runtime and Node paths are required for removal.");
     const serverPath = canonicalPath(path.join(settings.runtimeRoot, "tools", "AeFunctionsMcp.js"));
-    if (command !== nodePath || cwd !== runtimeRoot || !Array.isArray(args) || args.length !== 1 || canonicalPath(args[0]) !== serverPath) {
+    // The stable launcher lives at <InstallRoot>/AeFunctionsMcp.js for runtime <InstallRoot>/versions/<id>.
+    const installRoot = canonicalPath(path.dirname(path.dirname(settings.runtimeRoot)));
+    const stablePath = canonicalPath(path.join(installRoot, "AeFunctionsMcp.js"));
+    const server = Array.isArray(args) && args.length === 1 ? canonicalPath(args[0]) : null;
+    const versioned = cwd === runtimeRoot && server === serverPath;
+    const stable = cwd === installRoot && server === stablePath;
+    if (command !== nodePath || !(versioned || stable)) {
         return preserved("The AE MCP entry belongs to a different installation or command and was preserved.");
     }
     let updated = original;

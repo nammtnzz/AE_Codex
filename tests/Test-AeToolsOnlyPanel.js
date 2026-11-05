@@ -35,8 +35,8 @@ function folderDialog(f,run,picks=[]){
     f.host.context.Folder.selectDialog=function(){return picks.length?picks.shift():null;};return dialogs;
 }
 const tests=[],test=(name,run)=>tests.push({name,run});
-test("2.0.4 creates twenty four lightweight tools library connection progress and log controls",()=>{
-    const f=fixture();assert.equal(f.bridge.version,"2.0.4");assert.equal(f.controls.length,24);
+test("2.0.9 creates twenty nine lightweight tools library connection progress and log controls",()=>{
+    const f=fixture();assert.equal(f.bridge.version,"2.0.9");assert.equal(f.controls.length,29);
     assert.equal(f.bridge.chat,undefined);assert.equal(f.bridge.modelText,undefined);assert.equal(f.controls.filter(node=>node.type==="edittext").length,1);
     assert.ok(f.bridge.logView.creationProperties.readonly);assert.ok(f.bridge.logView.creationProperties.scrollable);
     for(const type of ["tabbedpanel","tab","dropdownlist","listbox","image"]){assert.equal(f.controls.some(node=>node.type===type),false,type);}
@@ -71,7 +71,7 @@ test("one hundred repeated loader calls reuse native controls without growing pa
     const f=fixture(),count=f.host.createdWindows.length,window=f.bridge.window,ui=f.bridge.ui,roots=f.bridge.ownedUiRoots;
     for(let i=0;i<100;i++)vm.runInContext(latest,f.host.context);
     assert.equal(f.host.createdWindows.length,count);assert.equal(f.bridge.window,window);assert.equal(f.bridge.ui,ui);
-    assert.equal(f.bridge.ownedUiRoots,roots);assert.equal(flatten(window).length,24);assert.equal(f.host.scheduled.size,1);
+    assert.equal(f.bridge.ownedUiRoots,roots);assert.equal(flatten(window).length,29);assert.equal(f.host.scheduled.size,1);
 });
 test("the work log starts collapsed expands locally and retains progress errors and bounded history",()=>{
     const f=fixture(),panel=f.controls.find(node=>node.type==="panel"),writes=f.host.writes.length;
@@ -97,7 +97,7 @@ test("an unchanged idle layout performs no native bounds writes or new controls"
     const f=fixture(),nodes=f.controls;let writes=0;
     for(const node of nodes){let bounds=node.bounds;Object.defineProperty(node,"bounds",{configurable:true,get(){return bounds;},set(value){writes++;bounds=value;}});}
     for(let i=0;i<1000;i++)f.bridge.ui.reflow(false);
-    assert.equal(writes,0);assert.equal(flatten(f.bridge.window).length,24);
+    assert.equal(writes,0);assert.equal(flatten(f.bridge.window).length,29);
 });
 test("unchanged tool status and connection snapshots do not rewrite native text or graphics",()=>{
     const f=fixture();f.bridge.refreshScriptsDisplay();f.bridge.setConnectionStatus(true,"Sẵn sàng");let writes=0;

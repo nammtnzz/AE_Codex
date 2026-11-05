@@ -1,10 +1,20 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param()
+param(
+    # Lessons learned on this machine ship with the release unless excluded.
+    [string]$KnowledgeDir = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AE_Codex/knowledge'),
+    [switch]$ExcludeKnowledge
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$sharedLessons = Join-Path $workspace '.ae-codex/share/shared-lessons.json'
+if ($ExcludeKnowledge) { if (Test-Path -LiteralPath $sharedLessons) { Remove-Item -LiteralPath $sharedLessons -Force } }
+else {
+    $exported = & $node (Join-Path $PSScriptRoot 'AeKnowledge.js') --export $KnowledgeDir $sharedLessons
+    if ($LASTEXITCODE -ne 0) { throw 'Learned knowledge could not be exported for the release.' }
+}
 $output = & $node (Join-Path $PSScriptRoot 'Build-AeDistribution.js')
 if ($LASTEXITCODE -ne 0) { throw 'Sanitized release build failed.' }
 $release = ($output -join "`n") | ConvertFrom-Json

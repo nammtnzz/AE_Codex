@@ -7,6 +7,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const {spawn} = require("node:child_process");
 const api = require("../tools/AeCodexChatHost.js");
+const {resolvePwsh} = require("../tools/AeFunctionsMcp.js");
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 function bounded(promise, timeout, message) {
     return new Promise((resolve, reject) => {
@@ -52,7 +53,7 @@ async function lockSharedRead(target, run) {
         "  while(-not [IO.File]::Exists($Release) -and [datetime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 20}",
         "} finally {$reader.Dispose()}"
     ].join("\n") + "\n");
-    const child = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File", script, "-Target", target, "-Ready", ready, "-Release", release],
+    const child = spawn(resolvePwsh(), ["-NoProfile", "-NonInteractive", "-File", script, "-Target", target, "-Ready", ready, "-Release", release],
         {windowsHide: true, stdio: ["ignore", "pipe", "pipe"]});
     child.stdout.resume(); child.stderr.resume();
     let spawnError; child.on("error", error => {spawnError = error;});

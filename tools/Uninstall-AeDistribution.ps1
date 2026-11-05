@@ -11,6 +11,8 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Unicode user/install paths (e.g. 'Máy mới') must survive child PowerShell output on non-UTF-8 consoles.
+$OutputEncoding = [Text.UTF8Encoding]::new($false); try { [Console]::OutputEncoding = $OutputEncoding } catch { }
 $utf8 = [Text.UTF8Encoding]::new($false)
 $payloadRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $setupLock = $null
@@ -342,7 +344,15 @@ try {
             }
         }
     } else { $backgroundState='skipped-fixture' }
-    $codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex' } else { $env:CODEX_HOME }
+    if ($AppDataRoot -ieq $realAppData) {
+        # The daily 10-day cleanup task belongs to this installation; project assets were never in its scope.
+        $retentionScript = Join-Path $InstallRoot 'Invoke-AeRetention.ps1'
+        if ([IO.File]::Exists($retentionScript)) {
+            try { & $retentionScript -Unregister | Out-Null; Write-ProgressLog 'Đã tắt tác vụ dọn dữ liệu cũ hằng ngày.' }
+            catch { $warnings.Add('Chưa tắt được tác vụ dọn hằng ngày: ' + $_.Exception.Message) }
+        }
+    }
+    $codexHome =if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex' } else { $env:CODEX_HOME }
     $configPath = [IO.Path]::GetFullPath((Join-Path $codexHome 'config.toml'))
     Assert-PlainPath $configPath
     if ([IO.File]::Exists($configPath)) {
@@ -363,6 +373,13 @@ try {
                 if ($null -ne $removed.PSObject.Properties['warning'] -and $removed.warning) { $foreignMcpWarning=[string]$removed.warning }
             }
             if (-not $mcpRemoved -and $foreignMcpWarning) { $warnings.Add('Đã giữ liên kết Codex thuộc runtime khác: ' + $foreignMcpWarning) }
+            if ($mcpRemoved) {
+                # Stable launcher/retention files at the install root are only used by the entry just removed.
+                foreach ($name in @('AeFunctionsMcp.js','Invoke-AeRetention.ps1','retention-last.json')) {
+                    $stableFile = Join-Path $InstallRoot $name
+                    if ([IO.File]::Exists($stableFile)) { Assert-PlainPath $stableFile; [IO.File]::Delete($stableFile) }
+                }
+            }
         }
     }
     Write-ProgressLog 'Đang gỡ các loader AE đã xác minh; giữ nguyên source, dự án, media và cấu hình.'

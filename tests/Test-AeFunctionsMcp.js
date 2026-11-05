@@ -18,7 +18,7 @@ fs.copyFileSync(path.join(workspaceRoot, "tools/AeFunctionsMcp.js"), path.join(f
 assert.match(fs.readFileSync(path.join(fixtureTools, "AeFunctionsMcp.js"), "utf8"),
     /"-ExecutionPolicy",\s*"Bypass",\s*"-File"/,
     "MCP must launch its unsigned local PowerShell client with process-scoped ExecutionPolicy Bypass");
-for (const name of ["AeCapabilities.js", "AeScriptSource.js"]) {
+for (const name of ["AeCapabilities.js", "AeScriptSource.js", "AeKnowledge.js"]) {
     fs.copyFileSync(path.join(workspaceRoot, "tools", name), path.join(fixtureTools, name));
 }
 fs.writeFileSync(path.join(fixtureFunctions, "catalog.json"), JSON.stringify({
@@ -110,8 +110,8 @@ function client(serverPath) {
         groups++;
 
         const list = (await transport.send("tools/list")).result.tools;
-        assert.equal(list.length, 9);
-        assert.deepEqual(list.map(tool => tool.name), ["ae_search_capabilities", "ae_inspect_capability", "ae_run_capability", "ae_capability_status", "ae_list_functions", "ae_run_plan", "ae_project_inspect", "ae_layer_text_create", "ae_script_run"]);
+        assert.equal(list.length, 17);
+        assert.deepEqual(list.map(tool => tool.name), ["ae_search_capabilities", "ae_inspect_capability", "ae_run_capability", "ae_capability_status", "ae_list_functions", "ae_run_plan", "ae_learning_queue", "ae_learning_material", "ae_learning_complete", "ae_learning_report", "ae_learning_enqueue", "ae_recall_knowledge", "ae_save_lesson", "ae_forget_lesson", "ae_project_inspect", "ae_layer_text_create", "ae_script_run"]);
         assert.equal(list.find(tool => tool.name === "ae_project_inspect").annotations.readOnlyHint, true);
         assert.equal(list.find(tool => tool.name === "ae_layer_text_create").annotations.readOnlyHint, false);
         assert.ok(list.find(tool => tool.name === "ae_run_plan").description.includes("Never automatically retry"));

@@ -32,7 +32,7 @@ try {
         fs.writeFileSync(path.join(fixture, name), "PRIVATE-FIXTURE-MUST-NOT-SHIP");
     }
     const result = buildDistribution(fixture);
-    assert.equal(result.toolCount, 43);
+    assert.equal(result.toolCount, 44);
     assert.equal(result.archiveBranches, 0);
     assert.equal(result.preservedDevelopmentBranches, 805);
     const manifest = json(path.join(result.payloadPath, "distribution.json"));
@@ -44,7 +44,7 @@ try {
     for (const excluded of ["tools/AeCodexChatHost.js", "tools/AeCodexChatMedia.js", "tools/New-AeChatPreview.ps1"]) {
         assert.ok(!manifest.files.some(file => file.path === excluded), excluded + " must not ship");
     }
-    assert.equal(manifest.files.length, 43);
+    assert.equal(manifest.files.length, 46);
     assert.deepEqual(manifest.internalBranches, ["Codex Library.jsx"]);
     assert.equal(json(path.join(result.payloadPath, "source/script-inventory.json")).names.length, 1);
     const actual = walk(result.payloadPath).filter(file => file !== "distribution.json");
@@ -58,7 +58,7 @@ try {
     }
     forbidden.forEach(name => assert.ok(!actual.includes(name), name));
     assert.equal(actual.filter(name => name.endsWith(".jsx")).length, 1);
-    console.log("PASS allowlisted release: 43 tools, one internal branch, one JSX, no local state/media/credentials");
+    console.log("PASS allowlisted release: 46 tools, one internal branch, one JSX, no local state/media/credentials");
     const bridgeInput = path.join(fixture, "source/bridge.js"), originalBridge = fs.readFileSync(bridgeInput, "utf8");
     const nextVersion = manifest.bridgeVersion.split(".").map(Number);
     nextVersion[2]++;
@@ -113,14 +113,14 @@ try {
     assert.ok(extendedCatalog.functions.some(tool => tool.name === "fixture.portable"));
     fs.writeFileSync(functionsInput, originalFunctions);
     console.log("PASS release coverage follows the source registry when a reusable tool is added");
-    const relocated = path.join(fixture, "Máy mới khác đường dẫn", "plugin");
+    const relocated = path.join(fixture, "New machine other path", "plugin");
     fs.mkdirSync(path.dirname(relocated), {recursive: true});
     fs.cpSync(result.payloadPath, relocated, {recursive: true});
     for (const [command, args] of [["status", []], ["search", ['{"query":"effect","limit":10}']]]) {
         const run = spawnSync(process.execPath, [path.join(relocated, "tools/Get-AeCapabilities.js"), command, ...args], {encoding: "utf8"});
         assert.equal(run.status, 0, run.stderr || run.stdout);
         const output = JSON.parse(run.stdout);
-        if (command === "status") { assert.equal(output.functions, 43); assert.equal(output.coverage.complete, true); }
+        if (command === "status") { assert.equal(output.functions, 44); assert.equal(output.coverage.complete, true); }
         else assert.ok(output.total > 0);
     }
     const verify = spawnSync(process.execPath, [path.join(relocated, "tools/Build-AeScriptBundle.js"), "--verify"], {encoding: "utf8"});

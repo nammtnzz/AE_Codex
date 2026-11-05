@@ -1,5 +1,12 @@
 # After Effects JSX workspace
 
+## Learned knowledge (learning loop)
+
+- Start every AE task with `ae_recall_knowledge` (request keywords + project name) and apply relevant lessons; they are hints from earlier sessions, so verify against the open project.
+- When the task is done, call `ae_save_lesson` once per reusable lesson: working effect/setting combinations, error fixes, user corrections and preferences, project conventions, approaches to avoid. Re-saving the same title reinforces it; use `ae_forget_lesson` for lessons that proved wrong.
+- The panel's **Học AE** button queues a learning request. At session start and when the user says "học AE", call `ae_learning_queue`; process pending requests: page through `ae_learning_material` kind `history` (the user's own past AE requests) for preferences, corrections and fixes, research the topic on the web starting from kind `sources`, save lessons with exact settings, then `ae_learning_complete`. Report what was learned.
+- Never save secrets, credentials, one-off values or unverified guesses. Lessons live in `<InstallRoot>/knowledge/lessons.json`, outside version folders, so upgrades and 10-day retention keep them.
+
 ## Installed plugin knowledge
 
 - Codex Bridge loads cached read-only effect/project-audio/SFX inventory on connection. Effects and SFX have independent saved indexing switches; only the user's **Cập nhật thư viện** action starts a refresh of enabled groups. Never restore automatic scans on connection or every 120 idle seconds. New files in configured roots are discovered on the next manual update. These switches control library indexing, not effects already applied to layers or project audio. Inventory refresh is independent of bundle installation validation. Before choosing a sound or checking plugins, read `.ae-codex/library/current.json` and `.ae-codex/library/USAGE.md`; inspect timestamps/warnings and honor disabled or missing catalogs. Use `rg` to search the SFX JSONL instead of reading the full catalog. Configured roots are in `.ae-codex/library/config.json`. New plugins require AE to load them (often after restart). An inventory entry does not authorize importing/applying it outside the requested edit or prove license/render support.

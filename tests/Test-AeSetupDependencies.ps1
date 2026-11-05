@@ -50,7 +50,7 @@ function Get-Command {
     if ($script:dependencyCommands.ContainsKey($Name)) { return $script:dependencyCommands[$Name] }
 }
 $script:dependencyCommands.pwsh = @([pscustomobject]@{Source=$versions[6]},[pscustomobject]@{Source=$versions[7]},[pscustomobject]@{Source=$versions[7]})
-$userRoot = Join-Path $fixture 'User đầy đủ'
+$userRoot = Join-Path $fixture 'User full'
 $localRoot = Join-Path $userRoot 'AppData/Local'
 $programRoot = Join-Path $fixture 'Program Files'
 $candidates = @(Get-SetupPowerShellCandidates -ProgramRoots @($programRoot,$programRoot) -LocalRoot $localRoot -UserRoot $userRoot)

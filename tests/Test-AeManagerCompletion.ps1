@@ -19,7 +19,7 @@ try{
         if($null-eq $definition){throw ('Missing manager helper: '+$name)}
         . ([scriptblock]::Create($definition.Extent.Text))
     }
-    $installRoot=Join-Path $fixture 'Máy mới/CodexAE'
+    $installRoot=Join-Path $fixture 'New machine/CodexAE'
     $runtimeRoot=Join-Path $installRoot 'versions/fixture-v1'
     $outputRoot=Join-Path $installRoot '.ae-codex/setup/manager-fixture'
     $metadataPath=Join-Path $installRoot 'installation.json'

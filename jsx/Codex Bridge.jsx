@@ -1,6 +1,6 @@
 #target aftereffects
 #targetengine "codexAeBridge"
-// CODEX_AE_BUNDLE_V2	9e8dabeb625e89740220938945db33751d0eca5680a7aa28f85075d558c505d1	2205931	254603	123634	56163833	805
+// CODEX_AE_BUNDLE_V2	594cdc46c972b5e364ba5f4dd0975dd4b51ef7bcad1d2ff39ea5cd81eac21f94	2220268	268940	123634	56163833	805
 /* ES3 runtime. Branch bodies remain inert in the indexed comment at EOF. */
 (function () {
     function workspaceRoot() {
@@ -1156,6 +1156,58 @@
 
 /* Installed module: functions-project-tools.js */
     /* Project/media/render tools. Injected into the reusable registry; ES3 only. */
+    register("comp.unpack", "Unpack a topmost identity precomp into its parent, preserving native layers, keys and parents", true,
+        { comp: "parent composition selector", layer: "topmost identity precomp layer", removeUnusedSource: "optional boolean; delete the source only when exclusively used by this container" },
+        function (a, refs) { selectors(a, refs, true); optional(a, "removeUnusedSource", boolValue); },
+        function (a, refs, entry) {
+            var selected = resolved(a, refs, entry, true), dest = selected.comp, container = selected.layer, source = container.source;
+            var originals = [], copies = [], parents = [], mattes = [], locks = [], i, j, p, v, expected, fx, masks, anchor = container, count = dest.numLayers, committed = false;
+            if (!isComp(source) || source === dest) { fail("Select a precomposition layer"); }
+            if (container.index !== 1 || container.locked || container.parent || container.threeDLayer || container.timeRemapEnabled || container.collapseTransformation || !container.enabled || container.solo || container.guideLayer) { fail("Unpack requires a topmost, unlocked, enabled, unparented 2D identity precomp"); }
+            if (container.stretch !== 100 || Math.abs(container.startTime) > 0.000001 || container.inPoint > 0 || container.outPoint < dest.duration || source.duration < dest.duration) { fail("Unpack requires untrimmed, unshifted, normal-speed coverage"); }
+            if (source.width !== dest.width || source.height !== dest.height || source.pixelAspect !== dest.pixelAspect || source.frameRate !== dest.frameRate || source.numLayers < 1 || source.numLayers > 1000) { fail("Unpack requires matching comp geometry/rate and 1..1000 layers"); }
+            if (container.hasAudio && !container.audioEnabled) { fail("Unpack does not support a muted container"); }
+            fx = container.property("ADBE Effect Parade"); masks = container.property("ADBE Mask Parade");
+            if ((fx && fx.numProperties) || (masks && masks.numProperties)) { fail("Unpack does not support container effects or masks"); }
+            expected = [["ADBE Position", [dest.width / 2, dest.height / 2]], ["ADBE Anchor Point", [source.width / 2, source.height / 2]], ["ADBE Scale", [100,100]], ["ADBE Rotate Z", 0], ["ADBE Opacity", 100]];
+            for (i = 0; i < expected.length; i += 1) {
+                p = container.property("ADBE Transform Group").property(expected[i][0]);
+                if (!p || p.numKeys || p.expressionEnabled) { fail("Unpack requires static identity transforms"); }
+                v = p.value;
+                if (array(expected[i][1])) { for (j = 0; j < 2; j += 1) { if (Math.abs(v[j] - expected[i][1][j]) > 0.000001) { fail("Unpack requires identity transforms"); } } }
+                else if (Math.abs(v - expected[i][1]) > 0.000001) { fail("Unpack requires identity transforms"); }
+            }
+            if (typeof BlendingMode !== "undefined" && container.blendingMode !== BlendingMode.NORMAL) { fail("Unpack requires Normal blending"); }
+            if (a.removeUnusedSource) {
+                if (!source.usedIn || source.usedIn.length !== 1 || source.usedIn[0] !== dest) { fail("Source is shared; it cannot be deleted"); }
+                for (i = 1; i <= dest.numLayers; i += 1) { if (dest.layer(i) !== container && dest.layer(i).source === source) { fail("Source has another instance"); } }
+                if (project().renderQueue) { for (i = 1; i <= project().renderQueue.numItems; i += 1) { if (project().renderQueue.item(i).comp === source) { fail("Source is used by the render queue"); } } }
+            }
+            for (i = 1; i <= source.numLayers; i += 1) {
+                p = source.layer(i); originals[i] = p; parents[i] = p.parent ? p.parent.index : 0; locks[i] = p.locked;
+                mattes[i] = p.trackMatteLayer ? p.trackMatteLayer.index : 0;
+                if (mattes[i] && typeof p.setTrackMatte !== "function") { fail("Explicit track matte relinking is unavailable"); }
+                if (typeof p.copyToComp !== "function") { fail("Native layer copying is unavailable"); }
+            }
+            try {
+                for (i = originals.length - 1; i >= 1; i -= 1) {
+                    originals[i].copyToComp(dest); p = dest.layer(1); copies[i] = p; p.locked = false;
+                    p.moveBefore(anchor); anchor = p;
+                }
+                for (i = 1; i < originals.length; i += 1) {
+                    p = copies[i]; p.setParentWithJump(parents[i] ? copies[parents[i]] : null);
+                    if (mattes[i]) { p.setTrackMatte(copies[mattes[i]], originals[i].trackMatteType); }
+                }
+                if (dest.numLayers !== count + source.numLayers) { fail("Copied layer count does not match"); }
+                for (i = 1; i < originals.length; i += 1) { copies[i].locked = locks[i]; }
+                container.remove(); committed = true;
+            } finally {
+                if (!committed) { for (i = 1; i < copies.length; i += 1) { if (copies[i]) { copies[i].locked = false; copies[i].remove(); } } }
+            }
+            count = originals.length - 1;
+            if (a.removeUnusedSource) { if (source.usedIn.length) { fail("Layers unpacked, but source unexpectedly remains referenced; source retained"); } source.remove(); }
+            return { compId: dest.id, unpackedLayers: count, numLayers: dest.numLayers, removedSource: !!a.removeUnusedSource };
+        }, "", { nativeInputSchema: { type: "object", properties: { comp: selectorSchema("comp"), layer: selectorSchema("layer"), removeUnusedSource: { type: "boolean" } }, required: ["layer"], additionalProperties: false } });
     var projectToolsRenderApprovals = [];
     function projectToolsType(item) {
         if (isComp(item)) { return "composition"; }
@@ -1776,7 +1828,7 @@
         thisObject = $.global.__CODEX_AE_PANEL_HOST__;
     }
     var GLOBAL_NAME = "__codexAeBridgeV1";
-    var BRIDGE_VERSION = "2.0.4";
+    var BRIDGE_VERSION = "2.0.9";
     function workspaceRoot() {
         var configured = $.global.__CODEX_AE_WORKSPACE_ROOT__, script;
         if (typeof configured === "string" && configured.replace(/^\s+|\s+$/g, "")) {
@@ -2200,6 +2252,89 @@
         };
         cartoonDialog(dialog, search, list, detail, close);
         fill(); dialog.center(); dialog.show();
+    };
+
+    // Queues a learning request for Codex. AE only writes the request; the next Codex
+    // session researches the topic (web + past sessions) and saves lessons through MCP.
+    Bridge.prototype.knowledgeRoot = function () {
+        var root = new Folder(this.workspaceRoot);
+        if (root.parent && String(root.parent.name).toLowerCase() === "versions" && root.parent.parent) { return root.parent.parent.fsName + "/knowledge"; }
+        return this.workspaceRoot + "/.ae-codex/knowledge";
+    };
+    Bridge.prototype.writeKnowledgeFile = function (name, text) {
+        var root = this.knowledgeRoot(), file;
+        this.ensureFolder(root); if (name.indexOf("queue/") === 0) { this.ensureFolder(root + "/queue"); }
+        file = new File(root + "/" + name);
+        file.encoding = "UTF-8";
+        if (!file.open("w")) { throw new Error(file.error || "cannot open " + name); }
+        try { if (!file.write(text)) { throw new Error(file.error || "cannot write " + name); } } finally { file.close(); }
+    };
+    Bridge.prototype.readLearningStatus = function () {
+        var file = new File(this.knowledgeRoot() + "/learning-status.json"), text, value = {}, keys = ["state", "phase", "message", "topic"],
+            numbers = ["percent", "historyLearned", "historyTotal", "lessonsSaved", "updatedEpochMs"], i, match;
+        if (!file.exists) { return null; }
+        file.encoding = "UTF-8";
+        if (!file.open("r")) { return null; }
+        try { text = file.read(); } finally { file.close(); }
+        for (i = 0; i < keys.length; i += 1) { match = new RegExp("\"" + keys[i] + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").exec(text); value[keys[i]] = match ? match[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\") : ""; }
+        for (i = 0; i < numbers.length; i += 1) { match = new RegExp("\"" + numbers[i] + "\"\\s*:\\s*(-?[0-9.]+)").exec(text); value[numbers[i]] = match ? Number(match[1]) : 0; }
+        return value;
+    };
+    Bridge.prototype.writeLearningControl = function (paused) {
+        this.writeKnowledgeFile("learning-control.json", "{\"schema\":\"codex-ae-learning-control/v1\",\"paused\":" + (paused ? "true" : "false") + ",\"updatedEpochMs\":" + new Date().getTime() + "}\n");
+    };
+    Bridge.prototype.learningPaused = function () {
+        var control = new File(this.knowledgeRoot() + "/learning-control.json"), paused = false;
+        if (control.exists && control.open("r")) { try { paused = /"paused"\s*:\s*true/.test(control.read()); } finally { control.close(); } }
+        return paused;
+    };
+    // Start queues a request (or resumes a paused one). Codex does the learning; the panel only
+    // writes the request/pause flag and shows the progress Codex publishes through MCP.
+    Bridge.prototype.startLearning = function () {
+        var topic, id;
+        try {
+            if (this.learningPaused()) {
+                this.writeLearningControl(false);
+                this.log("info", "Tiếp tục học AE. Nhắn Codex: tiếp tục học AE.");
+                alert("Đã cho phép học tiếp.\n\nNhắn Codex: tiếp tục học AE\nCodex học tiếp từ chỗ đã dừng.", "Học animation AE");
+            } else {
+                topic = prompt("Codex sẽ học kỹ thuật animation After Effects từ các nguồn trên mạng và các yêu cầu cũ của bạn.\nNhập chủ đề (để trống = học tổng quát):", "", "Học animation AE");
+                if (topic === null) { return; }
+                topic = String(topic).replace(/[\r\n\t]+/g, " ").replace(/^\s+|\s+$/g, "").slice(0, 200);
+                id = new Date().getTime() + "-" + Math.floor(Math.random() * 1e6);
+                this.writeLearningControl(false);
+                this.writeKnowledgeFile("queue/" + id + ".json", "{\"schema\":\"codex-ae-learning-request/v1\",\"id\":\"" + id + "\",\"topic\":\"" + jsonEscape(topic) +
+                    "\",\"includeHistory\":true,\"createdEpochMs\":" + new Date().getTime() + ",\"source\":\"panel\"}\n");
+                this.log("info", "Đã xếp hàng học \"" + (topic || "tổng quát") + "\". Nhắn Codex: học AE.");
+                alert("Đã gửi yêu cầu học cho Codex.\n\nMở Codex và nhắn: học AE\nTiến trình hiện trên thanh Học AE trong panel.", "Học animation AE");
+            }
+            this.lastLearningPoll = 0; this.refreshLearning();
+        } catch (learnError) { this.log("error", "Không gửi được yêu cầu học: " + this.describeError(learnError)); }
+    };
+    Bridge.prototype.pauseLearning = function () {
+        try {
+            this.writeLearningControl(true);
+            this.log("info", "Đã yêu cầu dừng học AE. Codex dừng ở bước kế tiếp và giữ tiến trình; bấm Tiếp tục để học tiếp.");
+            this.lastLearningPoll = 0; this.refreshLearning();
+        } catch (pauseError) { this.log("error", "Không dừng được: " + this.describeError(pauseError)); }
+    };
+    Bridge.prototype.refreshLearning = function () {
+        var now = new Date().getTime(), c = this.learningControls, status = null, paused = false, text, label, percent = 0;
+        if (!c || now - (this.lastLearningPoll || 0) < 3000) { return; }
+        this.lastLearningPoll = now;
+        try { status = this.readLearningStatus(); paused = this.learningPaused(); } catch (statusError) { status = null; }
+        if (!status) { text = "Học AE: chưa có yêu cầu. Bấm Học AE để bắt đầu."; }
+        else {
+            percent = Math.max(0, Math.min(100, Math.round(status.percent || 0)));
+            label = paused || status.state === "paused" ? "Đã dừng" : (status.state === "done" ? "Xong" : (status.state === "running" ? "Đang học" : "Chờ Codex"));
+            if (label === "Đang học" && now - status.updatedEpochMs > 180000) { label = "Chờ Codex"; }
+            text = "Học AE · " + label + " · " + percent + "% · " + status.lessonsSaved + " bài" +
+                (status.historyTotal ? " · lịch sử " + status.historyLearned + "/" + status.historyTotal : "") + (status.message ? " · " + status.message : "");
+        }
+        setControl(c.text, "text", text); setControl(c.text, "helpTip", text);
+        setControl(c.bar, "value", percent);
+        setControl(c.start, "text", paused ? "Tiếp tục" : "Học AE");
+        setControl(c.pause, "enabled", !paused && !!status && status.state !== "done");
     };
 
     Bridge.prototype.showFunctions = function () {
@@ -3293,6 +3428,7 @@
                             (this.busy ? "Executing JSX" : "Waiting for jobs"))
                 );
             }
+            try { this.refreshLearning(); } catch (learningUiError) {}
 
             if (!this.busy && !this.pendingReport && !this.pendingCleanupFile) {
                 var inbox = new Folder(this.inboxPath);
@@ -3572,6 +3708,16 @@
     sfxToggle.onClick = function () { bridge.setLibraryEnabled("sfx", !!sfxToggle.value); };
     refreshLibraryButton.onClick = function () { bridge.requestLibraryRefresh(); };
     sfxFoldersButton.onClick = function () { bridge.showSfxFolders(); };
+    var learnGroup = palette.add("group");
+    var learnText = learnGroup.add("statictext", undefined, "Học AE: chưa có yêu cầu. Bấm Học AE để bắt đầu.");
+    var learnBar = learnGroup.add("progressbar", undefined, 0, 100);
+    var learnStartButton = learnGroup.add("button", undefined, "Học AE");
+    var learnPauseButton = learnGroup.add("button", undefined, "Dừng học");
+    learnStartButton.helpTip = "Bắt đầu (hoặc tiếp tục) cho Codex học animation AE từ các nguồn và các yêu cầu cũ. Không chạy gì trong project.";
+    learnPauseButton.helpTip = "Dừng học: Codex dừng ở bước kế tiếp, giữ nguyên tiến trình và bài đã học.";
+    learnStartButton.onClick = function () { bridge.startLearning(); };
+    learnPauseButton.onClick = function () { bridge.pauseLearning(); };
+    learnPauseButton.enabled = false;
     var buttons = palette.add("group");
     var viewFunctionsButton = buttons.add("button", undefined, "Công cụ");
     var viewScriptsButton = buttons.add("button", undefined, "Kho script");
@@ -3609,6 +3755,8 @@
     cartoonButton(clearLogButton, [0.35, 0.29, 0.17, 1]); cartoonButton(logToggle, [0.22, 0.25, 0.31, 1]);
     cartoonButton(refreshLibraryButton, [0.19, 0.29, 0.46, 1]);
     cartoonButton(sfxFoldersButton, [0.29, 0.24, 0.44, 1]);
+    cartoonSurface(learnText, cartoonPaper, "Segoe UI", 10);
+    cartoonButton(learnStartButton, [0.16, 0.34, 0.27, 1]); cartoonButton(learnPauseButton, [0.43, 0.22, 0.23, 1]);
     try {
         bridge.connectionPens = {
             connected: connectionText.graphics.newPen(connectionText.graphics.PenType.SOLID_COLOR, [0.47, 0.88, 0.66, 1], 1),
@@ -3621,6 +3769,7 @@
     bridge.progressGroup = progressGroup; bridge.progressText = progressText; bridge.progressBar = progressBar;
     bridge.logView = logView; bridge.logSummary = logSummary;
     bridge.libraryControls = { effects: effectsToggle, sfx: sfxToggle, folders: sfxFoldersButton, refresh: refreshLibraryButton };
+    bridge.learningControls = { text: learnText, bar: learnBar, start: learnStartButton, pause: learnPauseButton };
     bridge.ui = { logExpanded: false, logVisible: false, layoutSignature: "" };
     bridge.logViewRevision = -1;
     bridge.hadUi = true;
@@ -3630,9 +3779,10 @@
         { control: sfxFoldersButton, action: "folders" }, { control: refreshLibraryButton, action: "refresh" },
         { control: viewFunctionsButton, action: "functions" }, { control: viewScriptsButton, action: "scripts" },
         { control: startButton, action: "start" }, { control: stopButton, action: "stop" },
-        { control: clearLogButton, action: "clearLog" }, { control: logToggle, action: "toggleLog" }
+        { control: clearLogButton, action: "clearLog" }, { control: logToggle, action: "toggleLog" },
+        { control: learnStartButton, action: "learnStart" }, { control: learnPauseButton, action: "learnPause" }
     ];
-    bridge.ownedUiRoots = [title, connectionText, statusText, scriptsText, libraryText, libraryOptions, buttons, progressGroup, logPanel, footer];
+    bridge.ownedUiRoots = [title, connectionText, statusText, scriptsText, libraryText, libraryOptions, learnGroup, buttons, progressGroup, logPanel, footer];
     // TOOLS_LAYOUT_BEGIN: idle ticks reuse bounds and never rebuild controls.
     function setToolsBounds(control, bounds) {
         var actual = control.bounds, i, same = !!actual;
@@ -3644,7 +3794,7 @@
         if (bridge.ui !== attachedUi || bridge.window !== palette) { return; }
         var size = palette.size, w = size && Number(typeof size.width === "number" ? size.width : size[0]),
             h = size && Number(typeof size.height === "number" ? size.height : size[1]),
-            ui = bridge.ui, m = 9, gap = 6, width, signature, footerY, logHeight, logY, buttonY, libraryY, progressY, infoBottom, buttonWidth, i, controls;
+            ui = bridge.ui, m = 9, gap = 6, width, signature, footerY, logHeight, logY, buttonY, learnY, learnTextWidth, learnVisible, libraryY, progressY, infoBottom, buttonWidth, i, controls;
         if (!isFinite(w) || !isFinite(h) || w < 340 || h < 220) { return; }
         signature = w + "|" + h + "|" + ui.logExpanded + "|" + progressGroup.visible;
         if (!force && signature === ui.layoutSignature) { return; }
@@ -3653,7 +3803,12 @@
         logHeight = ui.logExpanded && h >= 300 ? Math.min(140, Math.max(80, h - 252)) : 0;
         logY = footerY - gap - logHeight;
         progressY = logY - (progressGroup.visible ? 34 : 0) - gap;
-        buttonY = progressY - 30 - gap; libraryY = buttonY - 24 - gap; infoBottom = libraryY - gap;
+        buttonY = progressY - 30 - gap; learnY = buttonY - 30 - gap; libraryY = learnY - 24 - gap;
+        // A very short panel keeps the original rows; the learning row returns when there is room.
+        learnVisible = libraryY >= 100;
+        if (!learnVisible) { learnY = buttonY; libraryY = buttonY - 24 - gap; }
+        infoBottom = libraryY - gap;
+        learnTextWidth = Math.max(60, width - gap * 2 - 70 - 78);
         setToolsBounds(title, [m, m, w - m, m + 23]); setToolsBounds(connectionText, [m, 37, w - m, 57]);
         setToolsBounds(statusText, [m, 63, w - m, Math.max(63, Math.min(94, infoBottom))]);
         setToolsBounds(scriptsText, [m, Math.min(99, infoBottom), w - m, Math.min(132, infoBottom)]);
@@ -3661,6 +3816,11 @@
         setToolsBounds(libraryOptions, [m, libraryY, w - m, libraryY + 24]);
         setToolsBounds(effectsToggle, [0, 0, 64, 24]); setToolsBounds(sfxToggle, [68, 0, 112, 24]);
         setToolsBounds(sfxFoldersButton, [118, 0, 198, 24]); setToolsBounds(refreshLibraryButton, [204, 0, width, 24]);
+        setControl(learnGroup, "visible", learnVisible);
+        setToolsBounds(learnGroup, [m, learnY, w - m, learnY + (learnVisible ? 30 : 0)]);
+        setToolsBounds(learnText, [0, 0, learnTextWidth, 14]); setToolsBounds(learnBar, [0, 17, learnTextWidth, 27]);
+        setToolsBounds(learnStartButton, [learnTextWidth + gap, 0, learnTextWidth + gap + 70, 30]);
+        setToolsBounds(learnPauseButton, [learnTextWidth + gap * 2 + 70, 0, width, 30]);
         setToolsBounds(buttons, [m, buttonY, w - m, buttonY + 30]);
         buttonWidth = Math.floor((width - gap * 3) / 4);
         for (i = 0; i < controls.length; i += 1) { setToolsBounds(controls[i], [i * (buttonWidth + gap), 0, i === 3 ? width : i * (buttonWidth + gap) + buttonWidth, 30]); }

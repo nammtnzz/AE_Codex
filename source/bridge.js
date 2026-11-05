@@ -17,7 +17,7 @@
         thisObject = $.global.__CODEX_AE_PANEL_HOST__;
     }
     var GLOBAL_NAME = "__codexAeBridgeV1";
-    var BRIDGE_VERSION = "2.0.4";
+    var BRIDGE_VERSION = "2.0.9";
     function workspaceRoot() {
         var configured = $.global.__CODEX_AE_WORKSPACE_ROOT__, script;
         if (typeof configured === "string" && configured.replace(/^\s+|\s+$/g, "")) {
@@ -441,6 +441,89 @@
         };
         cartoonDialog(dialog, search, list, detail, close);
         fill(); dialog.center(); dialog.show();
+    };
+
+    // Queues a learning request for Codex. AE only writes the request; the next Codex
+    // session researches the topic (web + past sessions) and saves lessons through MCP.
+    Bridge.prototype.knowledgeRoot = function () {
+        var root = new Folder(this.workspaceRoot);
+        if (root.parent && String(root.parent.name).toLowerCase() === "versions" && root.parent.parent) { return root.parent.parent.fsName + "/knowledge"; }
+        return this.workspaceRoot + "/.ae-codex/knowledge";
+    };
+    Bridge.prototype.writeKnowledgeFile = function (name, text) {
+        var root = this.knowledgeRoot(), file;
+        this.ensureFolder(root); if (name.indexOf("queue/") === 0) { this.ensureFolder(root + "/queue"); }
+        file = new File(root + "/" + name);
+        file.encoding = "UTF-8";
+        if (!file.open("w")) { throw new Error(file.error || "cannot open " + name); }
+        try { if (!file.write(text)) { throw new Error(file.error || "cannot write " + name); } } finally { file.close(); }
+    };
+    Bridge.prototype.readLearningStatus = function () {
+        var file = new File(this.knowledgeRoot() + "/learning-status.json"), text, value = {}, keys = ["state", "phase", "message", "topic"],
+            numbers = ["percent", "historyLearned", "historyTotal", "lessonsSaved", "updatedEpochMs"], i, match;
+        if (!file.exists) { return null; }
+        file.encoding = "UTF-8";
+        if (!file.open("r")) { return null; }
+        try { text = file.read(); } finally { file.close(); }
+        for (i = 0; i < keys.length; i += 1) { match = new RegExp("\"" + keys[i] + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").exec(text); value[keys[i]] = match ? match[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\") : ""; }
+        for (i = 0; i < numbers.length; i += 1) { match = new RegExp("\"" + numbers[i] + "\"\\s*:\\s*(-?[0-9.]+)").exec(text); value[numbers[i]] = match ? Number(match[1]) : 0; }
+        return value;
+    };
+    Bridge.prototype.writeLearningControl = function (paused) {
+        this.writeKnowledgeFile("learning-control.json", "{\"schema\":\"codex-ae-learning-control/v1\",\"paused\":" + (paused ? "true" : "false") + ",\"updatedEpochMs\":" + new Date().getTime() + "}\n");
+    };
+    Bridge.prototype.learningPaused = function () {
+        var control = new File(this.knowledgeRoot() + "/learning-control.json"), paused = false;
+        if (control.exists && control.open("r")) { try { paused = /"paused"\s*:\s*true/.test(control.read()); } finally { control.close(); } }
+        return paused;
+    };
+    // Start queues a request (or resumes a paused one). Codex does the learning; the panel only
+    // writes the request/pause flag and shows the progress Codex publishes through MCP.
+    Bridge.prototype.startLearning = function () {
+        var topic, id;
+        try {
+            if (this.learningPaused()) {
+                this.writeLearningControl(false);
+                this.log("info", "Tiếp tục học AE. Nhắn Codex: tiếp tục học AE.");
+                alert("Đã cho phép học tiếp.\n\nNhắn Codex: tiếp tục học AE\nCodex học tiếp từ chỗ đã dừng.", "Học animation AE");
+            } else {
+                topic = prompt("Codex sẽ học kỹ thuật animation After Effects từ các nguồn trên mạng và các yêu cầu cũ của bạn.\nNhập chủ đề (để trống = học tổng quát):", "", "Học animation AE");
+                if (topic === null) { return; }
+                topic = String(topic).replace(/[\r\n\t]+/g, " ").replace(/^\s+|\s+$/g, "").slice(0, 200);
+                id = new Date().getTime() + "-" + Math.floor(Math.random() * 1e6);
+                this.writeLearningControl(false);
+                this.writeKnowledgeFile("queue/" + id + ".json", "{\"schema\":\"codex-ae-learning-request/v1\",\"id\":\"" + id + "\",\"topic\":\"" + jsonEscape(topic) +
+                    "\",\"includeHistory\":true,\"createdEpochMs\":" + new Date().getTime() + ",\"source\":\"panel\"}\n");
+                this.log("info", "Đã xếp hàng học \"" + (topic || "tổng quát") + "\". Nhắn Codex: học AE.");
+                alert("Đã gửi yêu cầu học cho Codex.\n\nMở Codex và nhắn: học AE\nTiến trình hiện trên thanh Học AE trong panel.", "Học animation AE");
+            }
+            this.lastLearningPoll = 0; this.refreshLearning();
+        } catch (learnError) { this.log("error", "Không gửi được yêu cầu học: " + this.describeError(learnError)); }
+    };
+    Bridge.prototype.pauseLearning = function () {
+        try {
+            this.writeLearningControl(true);
+            this.log("info", "Đã yêu cầu dừng học AE. Codex dừng ở bước kế tiếp và giữ tiến trình; bấm Tiếp tục để học tiếp.");
+            this.lastLearningPoll = 0; this.refreshLearning();
+        } catch (pauseError) { this.log("error", "Không dừng được: " + this.describeError(pauseError)); }
+    };
+    Bridge.prototype.refreshLearning = function () {
+        var now = new Date().getTime(), c = this.learningControls, status = null, paused = false, text, label, percent = 0;
+        if (!c || now - (this.lastLearningPoll || 0) < 3000) { return; }
+        this.lastLearningPoll = now;
+        try { status = this.readLearningStatus(); paused = this.learningPaused(); } catch (statusError) { status = null; }
+        if (!status) { text = "Học AE: chưa có yêu cầu. Bấm Học AE để bắt đầu."; }
+        else {
+            percent = Math.max(0, Math.min(100, Math.round(status.percent || 0)));
+            label = paused || status.state === "paused" ? "Đã dừng" : (status.state === "done" ? "Xong" : (status.state === "running" ? "Đang học" : "Chờ Codex"));
+            if (label === "Đang học" && now - status.updatedEpochMs > 180000) { label = "Chờ Codex"; }
+            text = "Học AE · " + label + " · " + percent + "% · " + status.lessonsSaved + " bài" +
+                (status.historyTotal ? " · lịch sử " + status.historyLearned + "/" + status.historyTotal : "") + (status.message ? " · " + status.message : "");
+        }
+        setControl(c.text, "text", text); setControl(c.text, "helpTip", text);
+        setControl(c.bar, "value", percent);
+        setControl(c.start, "text", paused ? "Tiếp tục" : "Học AE");
+        setControl(c.pause, "enabled", !paused && !!status && status.state !== "done");
     };
 
     Bridge.prototype.showFunctions = function () {
@@ -1534,6 +1617,7 @@
                             (this.busy ? "Executing JSX" : "Waiting for jobs"))
                 );
             }
+            try { this.refreshLearning(); } catch (learningUiError) {}
 
             if (!this.busy && !this.pendingReport && !this.pendingCleanupFile) {
                 var inbox = new Folder(this.inboxPath);
@@ -1813,6 +1897,16 @@
     sfxToggle.onClick = function () { bridge.setLibraryEnabled("sfx", !!sfxToggle.value); };
     refreshLibraryButton.onClick = function () { bridge.requestLibraryRefresh(); };
     sfxFoldersButton.onClick = function () { bridge.showSfxFolders(); };
+    var learnGroup = palette.add("group");
+    var learnText = learnGroup.add("statictext", undefined, "Học AE: chưa có yêu cầu. Bấm Học AE để bắt đầu.");
+    var learnBar = learnGroup.add("progressbar", undefined, 0, 100);
+    var learnStartButton = learnGroup.add("button", undefined, "Học AE");
+    var learnPauseButton = learnGroup.add("button", undefined, "Dừng học");
+    learnStartButton.helpTip = "Bắt đầu (hoặc tiếp tục) cho Codex học animation AE từ các nguồn và các yêu cầu cũ. Không chạy gì trong project.";
+    learnPauseButton.helpTip = "Dừng học: Codex dừng ở bước kế tiếp, giữ nguyên tiến trình và bài đã học.";
+    learnStartButton.onClick = function () { bridge.startLearning(); };
+    learnPauseButton.onClick = function () { bridge.pauseLearning(); };
+    learnPauseButton.enabled = false;
     var buttons = palette.add("group");
     var viewFunctionsButton = buttons.add("button", undefined, "Công cụ");
     var viewScriptsButton = buttons.add("button", undefined, "Kho script");
@@ -1850,6 +1944,8 @@
     cartoonButton(clearLogButton, [0.35, 0.29, 0.17, 1]); cartoonButton(logToggle, [0.22, 0.25, 0.31, 1]);
     cartoonButton(refreshLibraryButton, [0.19, 0.29, 0.46, 1]);
     cartoonButton(sfxFoldersButton, [0.29, 0.24, 0.44, 1]);
+    cartoonSurface(learnText, cartoonPaper, "Segoe UI", 10);
+    cartoonButton(learnStartButton, [0.16, 0.34, 0.27, 1]); cartoonButton(learnPauseButton, [0.43, 0.22, 0.23, 1]);
     try {
         bridge.connectionPens = {
             connected: connectionText.graphics.newPen(connectionText.graphics.PenType.SOLID_COLOR, [0.47, 0.88, 0.66, 1], 1),
@@ -1862,6 +1958,7 @@
     bridge.progressGroup = progressGroup; bridge.progressText = progressText; bridge.progressBar = progressBar;
     bridge.logView = logView; bridge.logSummary = logSummary;
     bridge.libraryControls = { effects: effectsToggle, sfx: sfxToggle, folders: sfxFoldersButton, refresh: refreshLibraryButton };
+    bridge.learningControls = { text: learnText, bar: learnBar, start: learnStartButton, pause: learnPauseButton };
     bridge.ui = { logExpanded: false, logVisible: false, layoutSignature: "" };
     bridge.logViewRevision = -1;
     bridge.hadUi = true;
@@ -1871,9 +1968,10 @@
         { control: sfxFoldersButton, action: "folders" }, { control: refreshLibraryButton, action: "refresh" },
         { control: viewFunctionsButton, action: "functions" }, { control: viewScriptsButton, action: "scripts" },
         { control: startButton, action: "start" }, { control: stopButton, action: "stop" },
-        { control: clearLogButton, action: "clearLog" }, { control: logToggle, action: "toggleLog" }
+        { control: clearLogButton, action: "clearLog" }, { control: logToggle, action: "toggleLog" },
+        { control: learnStartButton, action: "learnStart" }, { control: learnPauseButton, action: "learnPause" }
     ];
-    bridge.ownedUiRoots = [title, connectionText, statusText, scriptsText, libraryText, libraryOptions, buttons, progressGroup, logPanel, footer];
+    bridge.ownedUiRoots = [title, connectionText, statusText, scriptsText, libraryText, libraryOptions, learnGroup, buttons, progressGroup, logPanel, footer];
     // TOOLS_LAYOUT_BEGIN: idle ticks reuse bounds and never rebuild controls.
     function setToolsBounds(control, bounds) {
         var actual = control.bounds, i, same = !!actual;
@@ -1885,7 +1983,7 @@
         if (bridge.ui !== attachedUi || bridge.window !== palette) { return; }
         var size = palette.size, w = size && Number(typeof size.width === "number" ? size.width : size[0]),
             h = size && Number(typeof size.height === "number" ? size.height : size[1]),
-            ui = bridge.ui, m = 9, gap = 6, width, signature, footerY, logHeight, logY, buttonY, libraryY, progressY, infoBottom, buttonWidth, i, controls;
+            ui = bridge.ui, m = 9, gap = 6, width, signature, footerY, logHeight, logY, buttonY, learnY, learnTextWidth, learnVisible, libraryY, progressY, infoBottom, buttonWidth, i, controls;
         if (!isFinite(w) || !isFinite(h) || w < 340 || h < 220) { return; }
         signature = w + "|" + h + "|" + ui.logExpanded + "|" + progressGroup.visible;
         if (!force && signature === ui.layoutSignature) { return; }
@@ -1894,7 +1992,12 @@
         logHeight = ui.logExpanded && h >= 300 ? Math.min(140, Math.max(80, h - 252)) : 0;
         logY = footerY - gap - logHeight;
         progressY = logY - (progressGroup.visible ? 34 : 0) - gap;
-        buttonY = progressY - 30 - gap; libraryY = buttonY - 24 - gap; infoBottom = libraryY - gap;
+        buttonY = progressY - 30 - gap; learnY = buttonY - 30 - gap; libraryY = learnY - 24 - gap;
+        // A very short panel keeps the original rows; the learning row returns when there is room.
+        learnVisible = libraryY >= 100;
+        if (!learnVisible) { learnY = buttonY; libraryY = buttonY - 24 - gap; }
+        infoBottom = libraryY - gap;
+        learnTextWidth = Math.max(60, width - gap * 2 - 70 - 78);
         setToolsBounds(title, [m, m, w - m, m + 23]); setToolsBounds(connectionText, [m, 37, w - m, 57]);
         setToolsBounds(statusText, [m, 63, w - m, Math.max(63, Math.min(94, infoBottom))]);
         setToolsBounds(scriptsText, [m, Math.min(99, infoBottom), w - m, Math.min(132, infoBottom)]);
@@ -1902,6 +2005,11 @@
         setToolsBounds(libraryOptions, [m, libraryY, w - m, libraryY + 24]);
         setToolsBounds(effectsToggle, [0, 0, 64, 24]); setToolsBounds(sfxToggle, [68, 0, 112, 24]);
         setToolsBounds(sfxFoldersButton, [118, 0, 198, 24]); setToolsBounds(refreshLibraryButton, [204, 0, width, 24]);
+        setControl(learnGroup, "visible", learnVisible);
+        setToolsBounds(learnGroup, [m, learnY, w - m, learnY + (learnVisible ? 30 : 0)]);
+        setToolsBounds(learnText, [0, 0, learnTextWidth, 14]); setToolsBounds(learnBar, [0, 17, learnTextWidth, 27]);
+        setToolsBounds(learnStartButton, [learnTextWidth + gap, 0, learnTextWidth + gap + 70, 30]);
+        setToolsBounds(learnPauseButton, [learnTextWidth + gap * 2 + 70, 0, width, 30]);
         setToolsBounds(buttons, [m, buttonY, w - m, buttonY + 30]);
         buttonWidth = Math.floor((width - gap * 3) / 4);
         for (i = 0; i < controls.length; i += 1) { setToolsBounds(controls[i], [i * (buttonWidth + gap), 0, i === 3 ? width : i * (buttonWidth + gap) + buttonWidth, 30]); }

@@ -1,6 +1,6 @@
 # Codex + Adobe After Effects (Windows)
 
-Bản hiện tại: **Bridge 2.0.4**, 43 công cụ AE dùng lại. Tải bộ cài ZIP tại
+Bản hiện tại: **Bridge 2.0.9**, 43 công cụ AE dùng lại. Tải bộ cài ZIP tại
 [GitHub Releases](https://github.com/nammtnzz/AE_Codex/releases/latest), giải nén
 toàn bộ rồi chạy **Codex AE.exe**. Thư mục cài mặc định là `%LOCALAPPDATA%\AE_Codex`;
 source trong repo được giữ riêng với runtime đã cài.

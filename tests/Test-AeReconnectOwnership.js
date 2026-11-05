@@ -161,7 +161,7 @@ test("a missing-binding anchor from an older idle version is replaced once while
         host.dollar.global.__codexAeBridgeV1 = null; host.dollar.global.__CODEX_AE_PANEL_HOST__ = palette;
         try { vm.runInContext(latest, host.context); } finally { delete host.dollar.global.__CODEX_AE_PANEL_HOST__; }
         const replacement = host.dollar.global.__codexAeBridgeV1;
-        assert.notEqual(replacement, old); assert.equal(replacement.version, "2.0.4"); assert.equal(old.running, false); assert.equal(old.ui, null);
+        assert.notEqual(replacement, old); assert.equal(replacement.version, "2.0.9"); assert.equal(old.running, false); assert.equal(old.ui, null);
         assert.equal(nodes(palette).length, count); assert.equal(palette.__codexAeBridgeOwnerV1, replacement);
         assert.equal(replacement.running, !stopped); assert.equal(host.scheduled.size, stopped ? 0 : 1);
         if (stopped) assert.equal(JSON.parse(host.textAt(replacement.heartbeatPath)).state, "stopped");

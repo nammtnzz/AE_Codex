@@ -8,9 +8,9 @@ const {scanTomlStatements, upsertMcpConfig, readInstalledMcpSettings, registerFi
 const root = path.resolve(__dirname, "../.ae-codex/tests/codex-config-" + crypto.randomUUID());
 const settings = {
     nodePath: "C:\\Program Files\\nodejs\\node.exe",
-    serverPath: "D:\\Người mới\\Codex AE\\tools\\AeFunctionsMcp.js",
+    serverPath: "D:\\New user\\Codex AE\\tools\\AeFunctionsMcp.js",
     powershellPath: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-    workspaceRoot: "D:\\Người mới\\Codex AE"
+    workspaceRoot: "D:\\New user\\Codex AE"
 };
 let passed = 0;
 function test(name, run) { run(); passed++; }

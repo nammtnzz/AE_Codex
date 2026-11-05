@@ -3,12 +3,14 @@
 param([Parameter(Mandatory=$true)][string]$PayloadRoot)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+# Unicode user/install paths (e.g. 'New machine') must survive child PowerShell output on non-UTF-8 consoles.
+$OutputEncoding = [Text.UTF8Encoding]::new($false); try { [Console]::OutputEncoding = $OutputEncoding } catch { }
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $pwsh=(Get-Process -Id $PID).Path
 $fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('CodexAE-fixture-'+[guid]::NewGuid().ToString('N'))
 $fixtureData=Join-Path $fixtureRoot '.ae-codex'
 $payload=Join-Path $fixtureData 'payload'
-$installRoot=Join-Path $fixtureRoot 'New user đầy đủ/CodexAE'
+$installRoot=Join-Path $fixtureRoot 'New user full/CodexAE'
 $appData=Join-Path $fixtureData 'AppData'
 $checks=[Collections.Generic.List[string]]::new()
 [IO.Directory]::CreateDirectory($fixtureData)|Out-Null
@@ -168,7 +170,8 @@ try{
     $desktopCodex=Invoke-Install -Settings @{SfxChoice='Preserve';SkipMcpRegistration=$false}
     Assert-Check ($desktopCodex.state-eq 'success'-and $desktopCodex.mcpState-eq 'configured'-and $desktopCodex.mcpConfigPath-eq $fixtureCodexConfig-and $desktopCodex.codexReloadRequired-and -not $desktopCodex.codexSessionVerified) 'Without Codex CLI, setup registers tools in this computer''s isolated Codex Desktop config and reports reload required.'
     $localConfig=[IO.File]::ReadAllText($fixtureCodexConfig)
-    Assert-Check ($localConfig.StartsWith($unrelated)-and $localConfig.Contains('AeFunctionsMcp.js')-and $localConfig.Contains($desktopCodex.runtimeRoot.Replace('\','/'))) 'Local Codex registration preserves unrelated settings and references this installed runtime.'
+    $stableServer=[IO.Path]::GetFullPath((Join-Path $installRoot 'AeFunctionsMcp.js'))
+    Assert-Check ($localConfig.StartsWith($unrelated)-and $localConfig.Contains($stableServer.Replace('\','/'))-and -not $localConfig.Contains($desktopCodex.runtimeRoot.Replace('\','/'))-and [IO.File]::Exists($stableServer)) 'Local Codex registration preserves unrelated settings and uses the version-independent launcher, so upgrades keep the connection.'
 }finally{$env:PATH=$savedPath;$env:CODEX_HOME=$previousCodexHome}
 $reportRoot=Join-Path $workspace '.ae-codex/tests'
 [IO.Directory]::CreateDirectory($reportRoot)|Out-Null

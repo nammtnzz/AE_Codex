@@ -7,6 +7,8 @@
 param(
     [Parameter(Mandatory)][string]$InstallRoot,
     [int]$KeepArchives = 3,
+    # Keep superseded versions (and archives) until the active install is this many days old; 0 = immediately.
+    [int]$MinAgeDays = 0,
     [switch]$Fixture
 )
 Set-StrictMode -Version Latest
@@ -62,10 +64,13 @@ $processes = @()
 if (-not $Fixture) { $processes = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine }) }
 $retired = Join-Path $InstallRoot 'retired-data'
 $removed = @(); $deferred = @()
+$cutoff = [DateTime]::UtcNow.AddDays(-$MinAgeDays)
+$activeSince = if ($meta.PSObject.Properties['installedAt'] -and $meta.installedAt) { ([DateTime]$meta.installedAt).ToUniversalTime() } else { [DateTime]::UtcNow }
 
 foreach ($candidate in @(Get-ChildItem -LiteralPath $versions -Directory)) {
     if ($candidate.FullName -ieq $active -or $candidate.Name -notmatch '^\d+\.\d+\.\d+-[a-f0-9]{12}$') { continue }
     try {
+        if ($MinAgeDays -gt 0 -and $activeSince -gt $cutoff) { throw "kept until $($activeSince.AddDays($MinAgeDays).ToString('yyyy-MM-dd')) ($MinAgeDays-day rollback window)" }
         Assert-PlainPath $candidate.FullName
         if (@(Get-ChildItem -LiteralPath $candidate.FullName -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'contains linked paths' }
         Assert-Idle $candidate.FullName
@@ -96,5 +101,8 @@ foreach ($candidate in @(Get-ChildItem -LiteralPath $versions -Directory)) {
 if (Test-Path -LiteralPath $retired) {
     @(Get-ChildItem -LiteralPath $retired -Filter '*.zip' -File | Sort-Object LastWriteTimeUtc -Descending) |
         Select-Object -Skip ([Math]::Max(0, $KeepArchives)) | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+    if ($MinAgeDays -gt 0) {
+        @(Get-ChildItem -LiteralPath $retired -Filter '*.zip' -File | Where-Object { $_.LastWriteTimeUtc -lt $cutoff }) | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+    }
 }
 [pscustomobject]@{ schema = 'codex-ae-version-cleanup/v1'; active = (Split-Path -Leaf $active); removed = $removed; deferred = $deferred; archives = $retired } | ConvertTo-Json -Depth 4

@@ -5,7 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $testId = [guid]::NewGuid().ToString('N')
-$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) "Codex AE helper $testId/Máy mới & 100% O'Brien"
+$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) "Codex AE helper $testId/New machine & 100% O'Brien"
 $tools = Join-Path $fixtureRoot 'tools'
 $library = Join-Path $fixtureRoot '.ae-codex/library'
 $requests = Join-Path $library 'requests'

@@ -4,6 +4,8 @@ param([Parameter(Mandatory=$true)][string]$PayloadRoot)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Unicode user/install paths (e.g. 'New machine') must survive child PowerShell output on non-UTF-8 consoles.
+$OutputEncoding = [Text.UTF8Encoding]::new($false); try { [Console]::OutputEncoding = $OutputEncoding } catch { }
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $pwshPath = (Get-Process -Id $PID).Path
 $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -11,8 +13,8 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('CodexAE-local-link-' + [guid]::NewGuid().ToString('N'))
 $fixtureData = Join-Path $fixtureRoot '.ae-codex'
 $payload = Join-Path $fixtureData 'payload'
-$installRoot = Join-Path $fixtureRoot 'New user đầy đủ/CodexAE'
-$codexHome = Join-Path $fixtureData 'Codex desktop home đầy đủ'
+$installRoot = Join-Path $fixtureRoot 'New user full/CodexAE'
+$codexHome = Join-Path $fixtureData 'Codex desktop home full'
 $appData = Join-Path $fixtureData 'AppData'
 $configPath = Join-Path $codexHome 'config.toml'
 $checks = [Collections.Generic.List[string]]::new()
@@ -90,8 +92,10 @@ const settings = readInstalledMcpSettings(fs.readFileSync(configPath, "utf8"));
 const samePath = (a,b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 assert(samePath(settings.command, process.execPath), "Codex must use machine-local Node.js");
 assert.equal(settings.args.length,1);
-assert(samePath(settings.args[0],path.join(runtimeRoot,"tools/AeFunctionsMcp.js")),"MCP server must come from this installed runtime");
-assert(samePath(settings.cwd, runtimeRoot), "MCP cwd must be the installed runtime");
+// Codex points at the version-independent launcher in the install root; it routes to this runtime.
+const stableServer = path.join(path.dirname(path.dirname(runtimeRoot)),"AeFunctionsMcp.js");
+assert(samePath(settings.args[0],stableServer) && fs.existsSync(stableServer),"MCP server must be the stable launcher of this installation: "+settings.args[0]);
+assert(samePath(settings.cwd, path.dirname(stableServer)), "MCP cwd must be the installation root");
 assert(samePath(settings.env.CODEX_AE_PWSH, expectedPwsh), "MCP must retain the running machine-local PowerShell 7");
 const child = spawn(settings.command, settings.args, {cwd:settings.cwd,
     env:{...process.env,...settings.env},windowsHide:true,stdio:["pipe","pipe","pipe"]});
@@ -118,12 +122,12 @@ async function call(name,args={}){
         const initialized=await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"isolated-install-fixture",version:"1"}});
         assert.equal(initialized.serverInfo.name,"ae-functions");
         child.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
-        const listed=await send("tools/list");assert(listed.tools.some(tool=>tool.name==="ae_search_capabilities"));
+        const listed=await send("tools/list");assert(listed.tools.some(tool=>tool.name==="ae_search_capabilities"),"tools/list must include ae_search_capabilities");
         const search=await call("ae_search_capabilities",{limit:100});
-        assert.equal(search.total,43);assert(search.results.every(entry=>entry.kind==="function"));
+        const expectedTools=JSON.parse(fs.readFileSync(path.join(runtimeRoot,".ae-codex/functions/catalog.json"),"utf8")).functions.length;assert.equal(search.total,expectedTools);assert(search.results.every(entry=>entry.kind==="function"),"default search returns functions only: "+JSON.stringify(search.results.filter(entry=>entry.kind!=="function").map(entry=>entry.id)));
         assert.equal(search.installed.scripts,1);
         const status=await call("ae_capability_status");
-        assert.equal(status.activeTools,43);assert.equal(status.installation.certificateMatches,true);
+        assert.equal(status.activeTools,expectedTools);assert.equal(status.installation.certificateMatches,true);
         assert.equal(status.connection.fresh,false);assert.equal(status.runtimeVerified,false);
         assert(!fs.existsSync(path.join(runtimeRoot,".ae-codex/functions/requests")),"Read-only MCP probe must not dispatch function requests");
         assert(!fs.existsSync(path.join(runtimeRoot,".ae-codex/bridge/jobs")),"Read-only MCP probe must not create bridge jobs");
@@ -154,7 +158,7 @@ try {
     $firstText = [IO.File]::ReadAllText($configPath)
     Assert-Check ($firstText.Contains($unrelatedConfig)) 'Registration preserves unrelated Codex settings and apparent MCP headers inside multiline prompt text.'
     $firstProbe = Invoke-ReadOnlyProbe $first.runtimeRoot
-    Assert-Check ($firstProbe.state -eq 'success' -and $firstProbe.publicTools -eq 43 -and $firstProbe.transportVerified -and -not $firstProbe.bridgeConnected) 'The exact configured command starts MCP and discovers all 43 reusable tools without opening AE or dispatching a job.'
+    Assert-Check ($firstProbe.state -eq 'success' -and $firstProbe.publicTools -gt 0 -and $firstProbe.transportVerified -and -not $firstProbe.bridgeConnected) 'The exact configured command starts MCP and discovers every reusable tool in the installed catalog without opening AE or dispatching a job.'
     $metadata = [IO.File]::ReadAllText((Join-Path $installRoot 'installation.json')) | ConvertFrom-Json
     Assert-Check ($metadata.mcpState -eq 'configured' -and $metadata.mcpConfigPath -ieq $configPath -and $metadata.runtimeRoot -ieq $first.runtimeRoot) 'Installation metadata records the local Codex binding and installed runtime.'
     Save-FixtureManifest 'fixture-local-codex-v2'

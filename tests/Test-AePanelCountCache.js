@@ -20,6 +20,9 @@ function fixture() {
 const tests = [], test = (name, run) => tests.push({ name, run });
 test("ten thousand idle refreshes enumerate an unchanged public registry only once", () => {
     const { host, bridge } = fixture(), runtime = bridge.functions;
+    // Count comes from the installed registry, so adding a reusable tool never breaks this test.
+    const installed = runtime.list(false).length;
+    assert.ok(installed > 0);
     let enumerations = 0;
     bridge.functions = { list(includeLegacy) {
         assert.equal(includeLegacy, false);
@@ -27,7 +30,7 @@ test("ten thousand idle refreshes enumerate an unchanged public registry only on
         return runtime.list(includeLegacy);
     } };
     bridge.refreshScriptsDisplay();
-    assert.match(bridge.scriptsText.text, /43 chức năng dùng lại/);
+    assert.match(bridge.scriptsText.text, new RegExp(installed + " chức năng dùng lại"));
     let textWrites = 0, text = bridge.scriptsText.text;
     Object.defineProperty(bridge.scriptsText, "text", { get() { return text; }, set(value) { textWrites++; text = value; } });
     for (let i = 0; i < 10000; i++) bridge.refreshScriptsDisplay();
@@ -51,16 +54,16 @@ test("replacement registries invalidate the displayed count including an empty c
 });
 
 test("a failed replacement clears the stale count without removing the live UI or repeated retries", () => {
-    const { bridge } = fixture(), control = bridge.scriptsText;
+    const { bridge } = fixture(), control = bridge.scriptsText, installed = bridge.functions.list(false).length;
     bridge.refreshScriptsDisplay();
-    assert.match(control.text, /43 chức năng dùng lại/);
+    assert.match(control.text, new RegExp(installed + " chức năng dùng lại"));
     let attempts = 0;
     bridge.functions = { list() { attempts++; throw new Error("registry unavailable"); } };
     for (let i = 0; i < 1000; i++) bridge.refreshScriptsDisplay();
     assert.equal(attempts, 1);
     assert.equal(bridge.scriptsText, control);
     assert.match(control.text, /chưa đọc được danh mục/);
-    assert.doesNotMatch(control.text, /43 chức năng/);
+    assert.doesNotMatch(control.text, new RegExp(installed + " chức năng"));
     assert.match(control.helpTip, /registry unavailable/);
     bridge.functions = { list() { return new Array(2); } };
     bridge.refreshScriptsDisplay();

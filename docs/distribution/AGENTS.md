@@ -2,8 +2,18 @@
 
 Use installed native tools and JSON plans. Start with `ae_search_capabilities`,
 inspect the chosen tool with `ae_inspect_capability`, then run it using JSON args.
-There are 43 reusable public tools. Do not create task-specific JSX or arbitrary
+The installed catalog lists the reusable public tools. Do not create task-specific JSX or arbitrary
 eval requests. Add a reviewed reusable named function in development when needed.
+
+Learned knowledge: start every AE task with `ae_recall_knowledge` (request keywords
++ project name) and apply relevant lessons as hints; after the task, save each
+reusable lesson with `ae_save_lesson` (settings that worked, fixes, the user's
+corrections and preferences, project conventions, things to avoid). Never save
+secrets. Lessons live in `<InstallRoot>/knowledge`, survive upgrades, and may have
+been shared from another machine at install; keep learning on top of them.
+The panel's **Học AE** button queues learning: on "học AE" / "tiếp tục học AE" call
+`ae_learning_queue` and follow its workflow, reporting progress with
+`ae_learning_report`; stop immediately when a learning tool returns `paused: true`.
 
 Codex AE is a tools-and-connection panel with Stop/Reconnect, inventory
 status and a bounded job log. The user writes requests directly in Codex; Codex

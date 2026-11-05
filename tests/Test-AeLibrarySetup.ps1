@@ -4,7 +4,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$fixtureRoot = Join-Path $workspace ('.ae-codex/tests-library-setup/' + [guid]::NewGuid().ToString('N') + '/Máy mới portable')
+$fixtureRoot = Join-Path $workspace ('.ae-codex/tests-library-setup/' + [guid]::NewGuid().ToString('N') + '/New machine portable')
 $fixtureTools = Join-Path $fixtureRoot 'tools'
 $library = Join-Path $fixtureRoot '.ae-codex/library'
 [void][IO.Directory]::CreateDirectory($fixtureTools)
